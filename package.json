@@ -1,0 +1,40 @@
+{
+  "name": "weatherbot-ts",
+  "version": "1.0.0",
+  "description": "TypeScript fork of the Weather Trading Bot for Polymarket.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run signal",
+    "signal": "npm run build && node dist/index.js",
+    "paper": "npm run build && node dist/index.js --live",
+    "execute": "npm run build && node dist/index.js --execute",
+    "trade": "npm run build && node dist/index.js --execute --interval 30",
+    "positions": "npm run build && node dist/index.js --positions",
+    "reset": "npm run build && node dist/index.js --reset"
+  },
+  "keywords": [
+    "weather",
+    "polymarket",
+    "trading",
+    "bot",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@ethersproject/wallet": "^5.8.0",
+    "@polymarket/clob-client": "^4.22.8",
+    "axios": "^1.7.7",
+    "chalk": "^5.3.0",
+    "dotenv": "^16.4.5",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "@types/dotenv": "^6.1.1",
+    "@types/node": "^22.10.0",
+    "@types/yargs": "^17.0.32",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.0"
+  }
+}
