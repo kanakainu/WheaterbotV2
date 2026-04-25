@@ -13,6 +13,7 @@ import {
 } from "./polymarket";
 import { Position, Trade, loadSim, saveSim } from "./simState";
 import { MONTHS } from "./time";
+import * as db from "./db";
 import type { ClobClient } from "@polymarket/clob-client";
 import { calculateKellyPosition, calculateStopLoss, isStopLossHit } from "./risk";
 
