@@ -1,4 +1,5 @@
-// src/depth.ts - Order Book Depth Check (Anti-Slippage)
+// src/depth.ts - VERSI UPGRADE (Step 2)
+// Fix liquidity, spread filter, volume filter
 import axios from 'axios';
 
 const CLOB_API = 'https://clob.polymarket.com';
@@ -24,19 +25,30 @@ export async function getOrderBook(tokenId: string): Promise<OrderBook | null> {
   }
 }
 
-export async function getBestBidAsk(tokenId: string): Promise<{ bid: number; ask: number; bidSize: number; askSize: number } | null> {
+export async function getBestBidAsk(tokenId: string): Promise<{ bid: number; ask: number; bidSize: number; askSize: number; spread: number } | null> {
   const book = await getOrderBook(tokenId);
-  if (!book) return null;
+  if (!book || !book.bids.length || !book.asks.length) return null;
+  
+  const bid = book.bids[0]?.price || 0;
+  const ask = book.asks[0]?.price || 0;
+  const spread = (ask - bid) / ((ask + bid) / 2);
+  
+  // SPREAD FILTER: kalo spread > 4%, reject
+  if (spread > 0.04) {
+    console.log(`[Depth] Spread too high: ${(spread * 100).toFixed(2)}%`);
+    return null;
+  }
   
   return {
-    bid: book.bids[0]?.price || 0,
-    ask: book.asks[0]?.price || 0,
+    bid,
+    ask,
     bidSize: book.bids[0]?.size || 0,
-    askSize: book.asks[0]?.size || 0
+    askSize: book.asks[0]?.size || 0,
+    spread
   };
 }
 
-export async function isLiquidEnough(tokenId: string, requiredShares: number, slippagePercent: number = 10): Promise<boolean> {
+export async function isLiquidEnough(tokenId: string, requiredShares: number, slippagePercent: number = 5): Promise<boolean> {
   const book = await getOrderBook(tokenId);
   if (!book || !book.asks.length) return false;
   
@@ -58,7 +70,8 @@ export async function isLiquidEnough(tokenId: string, requiredShares: number, sl
   
   console.log(`[Depth] Required: ${requiredShares.toFixed(1)}, Available: ${availableShares.toFixed(1)}, Slippage: ${slippage.toFixed(2)}%`);
   
-  return availableShares >= requiredShares;
+  // FIX: return true only if sufficient shares AND slippage <= 5%
+  return (availableShares >= requiredShares && slippage <= 5);
 }
 
 export async function getMarketVolume(tokenId: string): Promise<{ volume24h: number; volume7d: number }> {
