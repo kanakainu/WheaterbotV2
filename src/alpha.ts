@@ -129,3 +129,22 @@ export function getRegion(citySlug: string): string {
 export function isCorrelated(region1: string, region2: string): boolean {
   return region1 === region2 && region1 !== 'unknown';
 }
+
+// ========== WEEK 3: DISAGREEMENT ALPHA (Chaos Pays) ==========
+export function getDisagreementEdgeBoost(
+  disagreementScore: number, 
+  unit: 'F' | 'C', 
+  baseEdge: number
+): number {
+  const threshold = unit === 'F' ? 4.0 : 2.2;
+  if (disagreementScore >= threshold) {
+    // High disagreement = market often mispriced
+    return baseEdge * 1.3;
+  }
+  return baseEdge;
+}
+
+export function getConsensusPenalty(consensus: boolean): number {
+  // Consensus is good, but sometimes overpriced
+  return consensus ? 1.0 : 1.05;  // 5% boost for non-consensus
+}
