@@ -22,22 +22,27 @@ import { CITIES } from "./cities";
 import { calculateEdge, getEdgeTier, getEdgeMultiplier, getConfidence, rankCandidates, AlphaCandidate, getRegion, isCorrelated, calculateLiquidityScore, getLiquidityTier, getDisagreementEdgeBoost, getConsensusPenalty } from "./alpha";
 
 // =============================================================================
-// PARAMETER & INTERFACE (WEEK 1-4)
+// PARAMETER & INTERFACE (LOOSENED FOR TESTING - WEEK 1-4)
 // =============================================================================
 
 const FALLBACK_POSITION_PCT = 0.02;
-const MAX_PORTFOLIO_EXPOSURE = 0.10;
-const MAX_OPEN_POSITIONS = 3;
+const MAX_PORTFOLIO_EXPOSURE = 0.15;           // Dinaikkan dari 0.10
+const MAX_OPEN_POSITIONS = 4;                  // Dinaikkan dari 3
 const STOP_LOSS_PCT = 0.15;
 const TRAILING_ACTIVATE_PCT = 0.15;
 const TRAILING_RETRACE_PCT = 0.92;
-const MAX_SLIPPAGE_PCT = 0.05;
-const DEPTH_SLIPPAGE_TOL = 10;
-const MIN_EDGE = 0.07;
-const MIN_CONFIDENCE = 0.70;
-const MIN_VOLUME_USD = 5000;
-const MIN_HOURS_LIQUID = 2;
-const MAX_SPREAD_PERCENT = 0.02;
+const MAX_SLIPPAGE_PCT = 0.08;                 // Dinaikkan dari 0.05
+const DEPTH_SLIPPAGE_TOL = 15;                 // Dinaikkan dari 10
+const MIN_EDGE = 0.03;                         // TURUN: 7% → 3%
+const MIN_CONFIDENCE = 0.60;                   // TURUN: 70% → 60%
+const MIN_VOLUME_USD = 1500;                   // TURUN: 5000 → 1500
+const MIN_HOURS_LIQUID = 1;                    // TURUN: 2 → 1
+const MAX_SPREAD_PERCENT = 0.04;               // NAIK: 2% → 4%
+
+// Adaptive edge untuk disagreement
+const DISAGREEMENT_EDGE_BOOST = 1.3;           // 30% boost
+const DISAGREEMENT_THRESHOLD_F = 3.0;          // 3°F disagreement
+const DISAGREEMENT_THRESHOLD_C = 1.8;          // 1.8°C disagreement
 
 const MIN_PAPER_ORDER_USD = 0.5;
 const MIN_EXECUTE_ORDER_USD = 1.0;
@@ -110,8 +115,12 @@ function estimateModelProbability(forecastTemp: number, bucket: [number, number]
   }
 }
 
-function nearBoundary(temp: number, low: number, high: number): boolean {
-  return temp === low || temp === high;
+// FIX: Boundary penalty instead of skip
+function nearBoundaryPenalty(forecastTemp: number, low: number, high: number): number {
+  if (forecastTemp === low || forecastTemp === high) {
+    return 0.7;  // 30% penalty, bukan skip
+  }
+  return 1.0;
 }
 
 function currentExposure(positions: Record<string, PositionWithTracker>): number {
@@ -302,7 +311,7 @@ export async function showPositions(): Promise<void> {
 }
 
 // =============================================================================
-// MAIN RUN FUNCTION (WEEK 1-4 INTEGRATED)
+// MAIN RUN FUNCTION (LOOSENED FILTERS)
 // =============================================================================
 export async function run(options: RunOptions): Promise<void> {
   const { mode, config } = options;
@@ -311,6 +320,8 @@ export async function run(options: RunOptions): Promise<void> {
   const positions = sim.positions as Record<string, PositionWithTracker>;
   let tradesExecuted = 0, exitsFound = 0;
   let clob: ClobClient | undefined;
+  let debugStats = { edgeReject: 0, confReject: 0, spreadReject: 0, volumeReject: 0, boundaryReject: 0, liquidityReject: 0, regionReject: 0 };
+
   if (mode === "execute") {
     try { clob = await getClobClient(config); } 
     catch (e) { 
@@ -385,7 +396,7 @@ export async function run(options: RunOptions): Promise<void> {
   }
   if (!exitsFound) skip("No exit opportunities");
 
-  // ENTRY SCAN (WEEK 1-4 INTEGRATED)
+  // ENTRY SCAN
   console.log(`\n${divider("ENTRY SCAN (Alpha Engine)", "cyan")}`);
   const activeLocations = getActiveLocations(config);
   const candidates: AlphaCandidate[] = [];
@@ -408,6 +419,7 @@ export async function run(options: RunOptions): Promise<void> {
         
         const region = getRegion(citySlug);
         if (openRegions.has(region)) {
+          debugStats.regionReject++;
           continue;
         }
         
@@ -422,7 +434,6 @@ export async function run(options: RunOptions): Promise<void> {
           let disagreementScore = 0;
           let consensus = true;
           
-          // WEEK 3: Multi-model ensemble
           if (cityData && config.use_ensemble) {
             const multiModel = await getMultiModelEnsemble(cityData, dateStr);
             if (multiModel.forecasts.length > 0) {
@@ -431,7 +442,7 @@ export async function run(options: RunOptions): Promise<void> {
               disagreementScore = multiModel.disagreementScore;
               consensus = multiModel.consensus;
               
-              if (!consensus && disagreementScore > (cityData.unit === 'F' ? 4 : 2.2)) {
+              if (!consensus && disagreementScore > (cityData.unit === 'F' ? DISAGREEMENT_THRESHOLD_F : DISAGREEMENT_THRESHOLD_C)) {
                 console.log(`[ALPHA] High disagreement! ${disagreementScore.toFixed(1)}°${cityData.unit} - chaos opportunity`);
               }
             }
@@ -467,7 +478,6 @@ export async function run(options: RunOptions): Promise<void> {
               if (usedEnsemble && cityData) {
                 const samples = await getMultiModelEnsemble(cityData, dateStr);
                 if (samples.forecasts.length > 0) {
-                  // Generate samples from models
                   const allSamples: number[] = [];
                   for (const f of samples.forecasts) {
                     for (let s = 0; s < 10; s++) {
@@ -497,19 +507,34 @@ export async function run(options: RunOptions): Promise<void> {
           if (isNaN(price)) { continue; }
           
           let edge = calculateEdge(modelProb, price);
+          let isDisagreementTrade = false;
           
-          // WEEK 3: Disagreement boost
-          if (!consensus && disagreementScore > (cityData?.unit === 'F' ? 4 : 2.2)) {
-            edge = edge * 1.3;
+          // Adaptive edge for disagreement
+          if (!consensus && disagreementScore > (cityData?.unit === 'F' ? DISAGREEMENT_THRESHOLD_F : DISAGREEMENT_THRESHOLD_C)) {
+            edge = edge * DISAGREEMENT_EDGE_BOOST;
+            isDisagreementTrade = true;
             console.log(`[ALPHA] Disagreement boost: ${(edge*100).toFixed(1)}% edge`);
           }
           
-          const confidence = getConfidence(modelProb);
+          // Boundary penalty (bukan skip)
+          const boundaryPenalty = nearBoundaryPenalty(forecastTemp, matched.range[0], matched.range[1]);
+          if (boundaryPenalty < 1.0) {
+            edge = edge * boundaryPenalty;
+            console.log(`[DEBUG] Boundary penalty applied: ${(boundaryPenalty*100).toFixed(0)}% of edge`);
+          }
+          
+          let confidence = getConfidence(modelProb);
           const edgeTier = getEdgeTier(edge);
           
-          if (edge < MIN_EDGE) continue;
-          if (confidence < MIN_CONFIDENCE) continue;
-          if (nearBoundary(forecastTemp, matched.range[0], matched.range[1])) continue;
+          // DEBUG FILTERS
+          if (edge < MIN_EDGE) {
+            debugStats.edgeReject++;
+            continue;
+          }
+          if (confidence < MIN_CONFIDENCE) {
+            debugStats.confReject++;
+            continue;
+          }
           
           let bestPriceData = null;
           let volume = { volume24h: 0, volume7d: 0 };
@@ -518,11 +543,15 @@ export async function run(options: RunOptions): Promise<void> {
           tokenIdCheck = getYesTokenId(matched.market);
           if (tokenIdCheck && mode !== "dry-run") {
             volume = await getMarketVolume(tokenIdCheck);
-            if (volume.volume24h < MIN_VOLUME_USD) continue;
+            if (volume.volume24h < MIN_VOLUME_USD) {
+              debugStats.volumeReject++;
+              continue;
+            }
             
             bestPriceData = await getBestBidAsk(tokenIdCheck);
             
             if (bestPriceData && bestPriceData.spreadPercent > MAX_SPREAD_PERCENT) {
+              debugStats.spreadReject++;
               continue;
             }
           }
@@ -531,6 +560,7 @@ export async function run(options: RunOptions): Promise<void> {
           const liquidityMetrics = calculateLiquidityScore(depthUSDC, volume.volume24h, bestPriceData?.spreadPercent || 0.03);
           
           if (!liquidityMetrics.isLiquid) {
+            debugStats.liquidityReject++;
             continue;
           }
           
@@ -563,11 +593,20 @@ export async function run(options: RunOptions): Promise<void> {
             confidence
           });
           
-          console.log(stat("Candidate", `${locData.name} edge=${(edge*100).toFixed(1)}% liq=${liquidityMetrics.totalScore}`, "green"));
+          console.log(stat("Candidate", `${locData.name} edge=${(edge*100).toFixed(1)}% liq=${liquidityMetrics.totalScore} ${isDisagreementTrade ? '🔥CHAOS' : ''}`, "green"));
         }
       }
     }
   }
+  
+  // Debug summary
+  console.log(`\n${divider("FILTER DEBUG", "yellow")}`);
+  console.log(`  Edge rejects: ${debugStats.edgeReject}`);
+  console.log(`  Confidence rejects: ${debugStats.confReject}`);
+  console.log(`  Spread rejects: ${debugStats.spreadReject}`);
+  console.log(`  Volume rejects: ${debugStats.volumeReject}`);
+  console.log(`  Liquidity rejects: ${debugStats.liquidityReject}`);
+  console.log(`  Region rejects: ${debugStats.regionReject}`);
   
   const rankedCandidates = rankCandidates(candidates);
   console.log(`\n${divider(`TOP ${rankedCandidates.length} CANDIDATES`, "green")}`);
