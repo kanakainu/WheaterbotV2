@@ -19,24 +19,25 @@ import { calculateStopLoss, isStopLossHit, adjustForDrawdown, getPositionSize } 
 import { isLiquidEnough, getBestBidAsk, getMarketVolume } from "./depth";
 import { notifyTrade, notifyError } from "./notify";
 import { CITIES } from "./cities";
-import { calculateEdge, getEdgeTier, getEdgeMultiplier, getConfidence, rankCandidates, AlphaCandidate, getRegion, isCorrelated } from "./alpha";
+import { calculateEdge, getEdgeTier, getEdgeMultiplier, getConfidence, rankCandidates, AlphaCandidate, getRegion, isCorrelated, calculateLiquidityScore, getLiquidityTier } from "./alpha";
 
 // =============================================================================
-// PARAMETER & INTERFACE (WEEK 1 UPGRADE)
+// PARAMETER & INTERFACE (WEEK 2)
 // =============================================================================
 
-const FALLBACK_POSITION_PCT = 0.02;           // 2% fallback
-const MAX_PORTFOLIO_EXPOSURE = 0.10;           // Max 10% total exposure (baru)
-const MAX_OPEN_POSITIONS = 3;                  // Max 3 open positions (baru)
+const FALLBACK_POSITION_PCT = 0.02;
+const MAX_PORTFOLIO_EXPOSURE = 0.10;
+const MAX_OPEN_POSITIONS = 3;
 const STOP_LOSS_PCT = 0.15;
 const TRAILING_ACTIVATE_PCT = 0.15;
 const TRAILING_RETRACE_PCT = 0.92;
 const MAX_SLIPPAGE_PCT = 0.05;
 const DEPTH_SLIPPAGE_TOL = 10;
-const MIN_EDGE = 0.07;                         // Minimal edge 7% (baru)
-const MIN_CONFIDENCE = 0.70;                   // Minimal confidence 70% (baru)
+const MIN_EDGE = 0.07;
+const MIN_CONFIDENCE = 0.70;
 const MIN_VOLUME_USD = 5000;
 const MIN_HOURS_LIQUID = 2;
+const MAX_SPREAD_PERCENT = 0.02;  // Week 2: Max 2% spread
 
 const MIN_PAPER_ORDER_USD = 0.5;
 const MIN_EXECUTE_ORDER_USD = 1.0;
@@ -54,10 +55,6 @@ export interface RunOptions {
   config: BotConfig;
   walletUsd?: number;
 }
-
-// =============================================================================
-// HELPER FUNCTIONS
-// =============================================================================
 
 function modeTone(mode: TradeMode): "green" | "yellow" | "cyan" {
   if (mode === "execute") return "green";
@@ -86,7 +83,6 @@ function getUnitDisplay(citySlug: string): string {
   return cityData?.unit || 'F';
 }
 
-// Improved estimateModelProbability
 function estimateModelProbability(forecastTemp: number, bucket: [number, number]): number {
   const low = bucket[0];
   const high = bucket[1];
@@ -126,9 +122,6 @@ function getOpenRegions(positions: Record<string, PositionWithTracker>): Set<str
   return regions;
 }
 
-// =============================================================================
-// POSITION SIZING WITH CONFIDENCE KELLY
-// =============================================================================
 function calculatePositionSizeWithConfidenceKelly(
   balance: number,
   modelProb: number,
@@ -149,9 +142,6 @@ function calculatePositionSizeWithConfidenceKelly(
   return Number(positionSize.toFixed(2));
 }
 
-// =============================================================================
-// EXIT LOGIC
-// =============================================================================
 async function checkAndExecuteExit(
   marketId: string,
   pos: PositionWithTracker,
@@ -259,9 +249,6 @@ async function checkAndExecuteExit(
   return false;
 }
 
-// =============================================================================
-// SHOW POSITIONS
-// =============================================================================
 export async function showPositions(): Promise<void> {
   const sim = await loadSim();
   const positions = sim.positions;
@@ -304,9 +291,6 @@ export async function showPositions(): Promise<void> {
   ], totalUnrealized >=0 ? "green" : "red"));
 }
 
-// =============================================================================
-// MAIN RUN FUNCTION (WEEK 1 UPGRADE)
-// =============================================================================
 export async function run(options: RunOptions): Promise<void> {
   const { mode, config } = options;
   const sim = await loadSim();
@@ -329,19 +313,19 @@ export async function run(options: RunOptions): Promise<void> {
     else break;
   }
 
-  // Drawdown protection: No trades after 4 losses
   if (losingStreak >= 4 && mode !== "dry-run") {
-    warn(`Losing streak ${losingStreak} >= 4, halting bot to preserve capital`);
+    warn(`Losing streak ${losingStreak} >= 4, halting bot`);
     return;
   }
 
-  console.log("\n" + panel("Weather Trading Bot (WEEK 1 - Alpha Engine)", [
+  console.log("\n" + panel("Weather Trading Bot (WEEK 2 - Microstructure Alpha)", [
     `${badge(modeText(mode), modeTone(mode))}`,
     stat("Balance", `$${balance.toFixed(2)}`, "cyan"),
     stat("Max position", `3% of balance`, "blue"),
     stat("Stop loss", `${STOP_LOSS_PCT*100}%`, "red"),
     stat("Min edge", `${MIN_EDGE*100}%`, "green"),
     stat("Min confidence", `${MIN_CONFIDENCE*100}%`, "green"),
+    stat("Max spread", `${MAX_SPREAD_PERCENT*100}%`, "yellow"),
     stat("Max exposure", `${MAX_PORTFOLIO_EXPOSURE*100}%`, "yellow"),
     stat("Max open", `${MAX_OPEN_POSITIONS}`, "yellow"),
     stat("Losing streak", `${losingStreak}`, losingStreak >= 2 ? "red" : "yellow"),
@@ -350,7 +334,6 @@ export async function run(options: RunOptions): Promise<void> {
   const balanceRef = { value: balance };
   const persist = mode === "paper" || mode === "execute";
 
-  // EXIT SCAN
   console.log(`\n${divider("EXIT SCAN", "magenta")}`);
   for (const [mid, pos] of Object.entries(positions)) {
     const currentPrice = await getMarketYesPrice(mid);
@@ -388,22 +371,18 @@ export async function run(options: RunOptions): Promise<void> {
   }
   if (!exitsFound) skip("No exit opportunities");
 
-  // ENTRY SCAN - WEEK 1 UPGRADE
   console.log(`\n${divider("ENTRY SCAN (Alpha Engine)", "cyan")}`);
   const activeLocations = getActiveLocations(config);
   const candidates: AlphaCandidate[] = [];
 
-  // Check open positions count
   const openCount = Object.keys(positions).length;
   if (openCount >= MAX_OPEN_POSITIONS) {
     skip(`Max open positions reached: ${openCount}/${MAX_OPEN_POSITIONS}`);
   } else {
-    // Check total exposure
     const exposure = currentExposure(positions);
     if (exposure > balanceRef.value * MAX_PORTFOLIO_EXPOSURE) {
       skip(`Exposure cap hit: ${((exposure/balanceRef.value)*100).toFixed(1)}% > ${MAX_PORTFOLIO_EXPOSURE*100}%`);
     } else {
-      // Get open regions for correlation check
       const openRegions = getOpenRegions(positions);
       
       for (const citySlug of activeLocations) {
@@ -412,10 +391,8 @@ export async function run(options: RunOptions): Promise<void> {
         const cityData = CITIES[citySlug];
         const unit = cityData?.unit || 'F';
         
-        // Correlation filter: skip if same region already open
         const region = getRegion(citySlug);
         if (openRegions.has(region)) {
-          skip(`${locData.name} (${region}) - already have position in this region`);
           continue;
         }
         
@@ -493,46 +470,41 @@ export async function run(options: RunOptions): Promise<void> {
           const confidence = getConfidence(modelProb);
           const edgeTier = getEdgeTier(edge);
           
-          // Edge filter (min 7%)
-          if (edge < MIN_EDGE) {
-            continue;
-          }
+          if (edge < MIN_EDGE) continue;
+          if (confidence < MIN_CONFIDENCE) continue;
+          if (nearBoundary(forecastTemp, matched.range[0], matched.range[1])) continue;
           
-          // Confidence filter (min 70%)
-          if (confidence < MIN_CONFIDENCE) {
-            continue;
-          }
+          let bestPriceData = null;
+          let volume = { volume24h: 0, volume7d: 0 };
+          let tokenIdCheck = null;
           
-          // Boundary filter
-          if (nearBoundary(forecastTemp, matched.range[0], matched.range[1])) {
-            continue;
-          }
-          
-          // Volume filter
-          const tokenIdCheck = getYesTokenId(matched.market);
+          tokenIdCheck = getYesTokenId(matched.market);
           if (tokenIdCheck && mode !== "dry-run") {
-            const volume = await getMarketVolume(tokenIdCheck);
-            if (volume.volume24h < MIN_VOLUME_USD) {
+            volume = await getMarketVolume(tokenIdCheck);
+            if (volume.volume24h < MIN_VOLUME_USD) continue;
+            
+            bestPriceData = await getBestBidAsk(tokenIdCheck);
+            
+            // WEEK 2: SPREAD FILTER
+            if (bestPriceData && bestPriceData.spreadPercent > MAX_SPREAD_PERCENT) {
               continue;
             }
           }
           
-          // Get edge multiplier for position sizing
+          // WEEK 2: LIQUIDITY SCORING
+          const depthUSDC = (bestPriceData?.askSize || 0) * (bestPriceData?.ask || price);
+          const liquidityMetrics = calculateLiquidityScore(depthUSDC, volume.volume24h, bestPriceData?.spreadPercent || 0.03);
+          
+          if (!liquidityMetrics.isLiquid) {
+            continue;
+          }
+          
           const edgeMultiplier = getEdgeMultiplier(edge);
-          
-          // Calculate position size with Confidence Kelly
           let positionSize = calculatePositionSizeWithConfidenceKelly(
-            balanceRef.value,
-            modelProb,
-            price,
-            confidence,
-            mode,
-            losingStreak
+            balanceRef.value, modelProb, price, confidence, mode, losingStreak
           );
-          
-          // Apply edge multiplier
           positionSize = positionSize * edgeMultiplier;
-          positionSize = Math.min(positionSize, balanceRef.value * 0.05); // Max 5% absolute cap
+          positionSize = Math.min(positionSize, balanceRef.value * 0.05);
           
           if (positionSize <= 0) continue;
           
@@ -542,8 +514,13 @@ export async function run(options: RunOptions): Promise<void> {
             price,
             modelProb,
             edge,
-            spread: 0,
-            volume24h: tokenIdCheck ? (await getMarketVolume(tokenIdCheck)).volume24h : 0,
+            spread: bestPriceData?.spread || 0,
+            spreadPercent: bestPriceData?.spreadPercent || 0,
+            spreadScore: bestPriceData?.spreadScore || 0,
+            volume24h: volume.volume24h,
+            depthUSDC,
+            liquidityScore: liquidityMetrics.totalScore,
+            liquidityTier: getLiquidityTier(liquidityMetrics.totalScore),
             question: matched.question,
             citySlug,
             region,
@@ -551,13 +528,12 @@ export async function run(options: RunOptions): Promise<void> {
             confidence
           });
           
-          console.log(stat("Candidate", `${locData.name} edge=${(edge*100).toFixed(1)}% conf=${(confidence*100).toFixed(0)}% tier=${edgeTier}`, "green"));
+          console.log(stat("Candidate", `${locData.name} edge=${(edge*100).toFixed(1)}% liq=${liquidityMetrics.totalScore}`, "green"));
         }
       }
     }
   }
   
-  // Rank and execute top candidates
   const rankedCandidates = rankCandidates(candidates);
   console.log(`\n${divider(`TOP ${rankedCandidates.length} CANDIDATES`, "green")}`);
   
@@ -567,12 +543,7 @@ export async function run(options: RunOptions): Promise<void> {
     
     const edgeMultiplier = getEdgeMultiplier(cand.edge);
     let positionSize = calculatePositionSizeWithConfidenceKelly(
-      balanceRef.value,
-      cand.modelProb,
-      cand.price,
-      cand.confidence,
-      mode,
-      losingStreak
+      balanceRef.value, cand.modelProb, cand.price, cand.confidence, mode, losingStreak
     );
     positionSize = positionSize * edgeMultiplier;
     positionSize = Math.min(positionSize, balanceRef.value * 0.05);
@@ -590,12 +561,11 @@ export async function run(options: RunOptions): Promise<void> {
       stat("Price", `$${cand.price.toFixed(3)}`, "green"),
       stat("Model Prob", `${(cand.modelProb*100).toFixed(1)}%`, "yellow"),
       stat("Confidence", `${(cand.confidence*100).toFixed(0)}%`, "yellow"),
+      stat("Liquidity", `${cand.liquidityTier} (${cand.liquidityScore})`, "green"),
       stat("Size", `$${positionSize.toFixed(2)} (${((positionSize/balanceRef.value)*100).toFixed(1)}% of balance)`, "yellow"),
       stat("Stop loss", `$${(cand.price * (1 - STOP_LOSS_PCT)).toFixed(3)} (${STOP_LOSS_PCT*100}%)`, "red"),
-      edgeMultiplier > 1 ? stat("Edge Boost", `${edgeMultiplier}x`, "green") : null,
     ].filter(Boolean), "green"));
     
-    // Depth check
     if (cand.tokenId && mode !== "dry-run") {
       const requiredShares = positionSize / cand.price;
       const isLiquid = await isLiquidEnough(cand.tokenId, requiredShares, DEPTH_SLIPPAGE_TOL);
@@ -648,7 +618,7 @@ export async function run(options: RunOptions): Promise<void> {
     sim.total_trades++;
     sim.trades.push({ type: "entry", question: cand.question, entry_price: cand.price, shares, cost: positionSize, opened_at: new Date().toISOString() });
     tradesExecuted++;
-    ok(`Position opened — $${positionSize.toFixed(2)} (${((positionSize/balanceRef.value)*100).toFixed(1)}% of balance)`);
+    ok(`Position opened — $${positionSize.toFixed(2)}`);
   }
   
   if (tradesExecuted === 0 && candidates.length === 0) skip("No candidates found");
