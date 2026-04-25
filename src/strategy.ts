@@ -15,29 +15,28 @@ import {
 import { Position, Trade, loadSim, saveSim } from "./simState";
 import { MONTHS } from "./time";
 import type { ClobClient } from "@polymarket/clob-client";
-import { calculateKellyPosition, calculateStopLoss, isStopLossHit, adjustForDrawdown } from "./risk";
+import { calculateStopLoss, isStopLossHit, adjustForDrawdown, getPositionSize } from "./risk";
 import { isLiquidEnough, getBestBidAsk, getMarketVolume } from "./depth";
 import { notifyTrade, notifyError } from "./notify";
 import { CITIES } from "./cities";
+import { calculateEdge, getEdgeTier, getEdgeMultiplier, getConfidence, rankCandidates, AlphaCandidate, getRegion, isCorrelated } from "./alpha";
 
 // =============================================================================
-// PARAMETER & INTERFACE (LOOSENED FOR TESTING)
+// PARAMETER & INTERFACE (WEEK 1 UPGRADE)
 // =============================================================================
 
-const FALLBACK_POSITION_PCT = 0.03;
-const KELLY_FRACTION = 0.25;
-const MAX_POSITION_PCT = 0.05;
-const MAX_PORTFOLIO_EXPOSURE = 0.50;     // Dinaikkan dari 0.30
+const FALLBACK_POSITION_PCT = 0.02;           // 2% fallback
+const MAX_PORTFOLIO_EXPOSURE = 0.10;           // Max 10% total exposure (baru)
+const MAX_OPEN_POSITIONS = 3;                  // Max 3 open positions (baru)
 const STOP_LOSS_PCT = 0.15;
 const TRAILING_ACTIVATE_PCT = 0.15;
 const TRAILING_RETRACE_PCT = 0.92;
-const MAX_SLIPPAGE_PCT = 0.08;           // Dinaikkan dari 0.03
-const DEPTH_SLIPPAGE_TOL = 15;           // Dinaikkan dari 5
-const MIN_EDGE = 0.02;                   // 2% (testing)
-const MIN_HOURS_LIQUID = 1;              // Turun dari 2
-const MIN_VOLUME_USD = 1000;             // Turun dari 5000
-const MIN_CONFIDENCE = 0.55;             // Turun dari 0.62
-const FALLBACK_CONFIDENCE = 0.68;        // Fallback confidence kalo ensemble gagal
+const MAX_SLIPPAGE_PCT = 0.05;
+const DEPTH_SLIPPAGE_TOL = 10;
+const MIN_EDGE = 0.07;                         // Minimal edge 7% (baru)
+const MIN_CONFIDENCE = 0.70;                   // Minimal confidence 70% (baru)
+const MIN_VOLUME_USD = 5000;
+const MIN_HOURS_LIQUID = 2;
 
 const MIN_PAPER_ORDER_USD = 0.5;
 const MIN_EXECUTE_ORDER_USD = 1.0;
@@ -92,7 +91,6 @@ function estimateModelProbability(forecastTemp: number, bucket: [number, number]
   const low = bucket[0];
   const high = bucket[1];
   
-  // Handle unlimited buckets
   if (low === -999) {
     return Math.min(0.95, Math.max(0.05, 1 - (forecastTemp / high)));
   }
@@ -100,7 +98,6 @@ function estimateModelProbability(forecastTemp: number, bucket: [number, number]
     return Math.min(0.95, Math.max(0.05, forecastTemp / low));
   }
   
-  // Normal bucket
   const range = high - low;
   const center = (low + high) / 2;
   const distanceToCenter = Math.abs(forecastTemp - center);
@@ -114,7 +111,6 @@ function estimateModelProbability(forecastTemp: number, bucket: [number, number]
 }
 
 function nearBoundary(temp: number, low: number, high: number): boolean {
-  // Longgarkan: skip hanya kalo EXACTLY di batas
   return temp === low || temp === high;
 }
 
@@ -122,25 +118,30 @@ function currentExposure(positions: Record<string, PositionWithTracker>): number
   return Object.values(positions).reduce((sum, p) => sum + (p.cost || 0), 0);
 }
 
-function calculatePositionSizeWithKelly(
+function getOpenRegions(positions: Record<string, PositionWithTracker>): Set<string> {
+  const regions = new Set<string>();
+  for (const pos of Object.values(positions)) {
+    regions.add(getRegion(pos.location));
+  }
+  return regions;
+}
+
+// =============================================================================
+// POSITION SIZING WITH CONFIDENCE KELLY
+// =============================================================================
+function calculatePositionSizeWithConfidenceKelly(
   balance: number,
   modelProb: number,
   marketPrice: number,
+  confidence: number,
   mode: TradeMode,
   losingStreak: number = 0
 ): number {
-  const rawKelly = calculateKellyPosition(modelProb, marketPrice);
-  let positionPct = rawKelly * KELLY_FRACTION;
+  let positionPct = getPositionSize(modelProb, marketPrice, confidence, losingStreak);
   
-  if (!isFinite(positionPct) || positionPct <= 0) {
-    positionPct = FALLBACK_POSITION_PCT;
-    warn(`Kelly returned ${rawKelly}, falling back to ${FALLBACK_POSITION_PCT * 100}%`);
-  }
-  
-  positionPct = Math.min(positionPct, MAX_POSITION_PCT);
+  if (positionPct <= 0) return 0;
   
   let positionSize = balance * positionPct;
-  positionSize = adjustForDrawdown(positionSize, losingStreak);
   
   const minOrderUsd = mode === "execute" ? MIN_EXECUTE_ORDER_USD : MIN_PAPER_ORDER_USD;
   if (positionSize < minOrderUsd) positionSize = minOrderUsd;
@@ -149,7 +150,7 @@ function calculatePositionSizeWithKelly(
 }
 
 // =============================================================================
-// EXIT LOGIC (sama seperti sebelumnya)
+// EXIT LOGIC
 // =============================================================================
 async function checkAndExecuteExit(
   marketId: string,
@@ -304,7 +305,7 @@ export async function showPositions(): Promise<void> {
 }
 
 // =============================================================================
-// MAIN RUN FUNCTION
+// MAIN RUN FUNCTION (WEEK 1 UPGRADE)
 // =============================================================================
 export async function run(options: RunOptions): Promise<void> {
   const { mode, config } = options;
@@ -328,20 +329,23 @@ export async function run(options: RunOptions): Promise<void> {
     else break;
   }
 
-  console.log("\n" + panel("Weather Trading Bot (FIXED - Edge Trading)", [
+  // Drawdown protection: No trades after 4 losses
+  if (losingStreak >= 4 && mode !== "dry-run") {
+    warn(`Losing streak ${losingStreak} >= 4, halting bot to preserve capital`);
+    return;
+  }
+
+  console.log("\n" + panel("Weather Trading Bot (WEEK 1 - Alpha Engine)", [
     `${badge(modeText(mode), modeTone(mode))}`,
     stat("Balance", `$${balance.toFixed(2)}`, "cyan"),
-    stat("Position sizing", `${KELLY_FRACTION*100}% Kelly (max 5%)`, "blue"),
+    stat("Max position", `3% of balance`, "blue"),
     stat("Stop loss", `${STOP_LOSS_PCT*100}%`, "red"),
     stat("Min edge", `${MIN_EDGE*100}%`, "green"),
     stat("Min confidence", `${MIN_CONFIDENCE*100}%`, "green"),
-    stat("Losing streak", `${losingStreak}`, losingStreak >= 5 ? "red" : "yellow"),
+    stat("Max exposure", `${MAX_PORTFOLIO_EXPOSURE*100}%`, "yellow"),
+    stat("Max open", `${MAX_OPEN_POSITIONS}`, "yellow"),
+    stat("Losing streak", `${losingStreak}`, losingStreak >= 2 ? "red" : "yellow"),
   ], modeTone(mode)));
-
-  if (mode !== "dry-run" && losingStreak >= 10) {
-    warn("Losing streak >= 10, halting bot");
-    return;
-  }
 
   const balanceRef = { value: balance };
   const persist = mode === "paper" || mode === "execute";
@@ -384,170 +388,225 @@ export async function run(options: RunOptions): Promise<void> {
   }
   if (!exitsFound) skip("No exit opportunities");
 
-  // ENTRY SCAN
-  console.log(`\n${divider("ENTRY SCAN (Alpha Ranking)", "cyan")}`);
+  // ENTRY SCAN - WEEK 1 UPGRADE
+  console.log(`\n${divider("ENTRY SCAN (Alpha Engine)", "cyan")}`);
   const activeLocations = getActiveLocations(config);
-  const candidates: any[] = [];
+  const candidates: AlphaCandidate[] = [];
 
-  for (const citySlug of activeLocations) {
-    if (!(citySlug in LOCATIONS)) continue;
-    const locData = LOCATIONS[citySlug as keyof typeof LOCATIONS];
-    const cityData = CITIES[citySlug];
-    const unit = cityData?.unit || 'F';
-    
-    for (let i = 0; i < 4; i++) {
-      const date = new Date(); date.setDate(date.getDate() + i);
-      const dateStr = date.toISOString().slice(0,10);
-      const month = MONTHS[date.getMonth()], day = date.getDate(), year = date.getFullYear();
+  // Check open positions count
+  const openCount = Object.keys(positions).length;
+  if (openCount >= MAX_OPEN_POSITIONS) {
+    skip(`Max open positions reached: ${openCount}/${MAX_OPEN_POSITIONS}`);
+  } else {
+    // Check total exposure
+    const exposure = currentExposure(positions);
+    if (exposure > balanceRef.value * MAX_PORTFOLIO_EXPOSURE) {
+      skip(`Exposure cap hit: ${((exposure/balanceRef.value)*100).toFixed(1)}% > ${MAX_PORTFOLIO_EXPOSURE*100}%`);
+    } else {
+      // Get open regions for correlation check
+      const openRegions = getOpenRegions(positions);
       
-      let forecastTemp: number | null = null;
-      let modelProb: number = 0.5;
-      let usedEnsemble = false;
-      
-      if (cityData && config.use_ensemble) {
-        const samples = await getEnsembleTemperatures(cityData, dateStr);
-        if (samples && samples.length) {
-          forecastTemp = samples.reduce((a,b) => a+b, 0) / samples.length;
-          forecastTemp = Math.round(forecastTemp * 10) / 10;
-          usedEnsemble = true;
-        }
-      }
-      
-      if (!forecastTemp) {
-        const forecast = await getForecast(citySlug);
-        forecastTemp = forecast[dateStr] || null;
-      }
-      
-      if (!forecastTemp) continue;
-      
-      const event = await getPolymarketEvent(citySlug, month, day, year);
-      if (!event) continue;
-      const hoursLeft = hoursUntilResolution(event);
-      
-      console.log("\n" + panel(`${locData.name} • ${dateStr}`, [
-        stat("Forecast", `${forecastTemp}°${unit}`, "cyan"),
-        stat("Resolves in", `${hoursLeft.toFixed(0)}h`, hoursLeft < MIN_HOURS_LIQUID ? "red" : "green"),
-        usedEnsemble ? stat("Source", "Ensemble", "green") : stat("Source", "Deterministic", "yellow"),
-      ], "blue"));
-      
-      if (hoursLeft < MIN_HOURS_LIQUID) { skip("Too soon"); continue; }
-      
-      let matched = null;
-      for (const market of event.markets ?? []) {
-        const rng = parseTempRange(market.question || "");
-        if (rng && rng[0] <= forecastTemp && forecastTemp <= rng[1]) {
-          let rawPrices = market.outcomePrices ?? "[0.5,0.5]";
-          let prices;
-          try {
-            prices = JSON.parse(rawPrices) as number[];
-          } catch {
-            prices = [0.5, 0.5];
-          }
-          const yesPrice = Number(prices[0]);
-          if (isNaN(yesPrice)) continue;
-          
-          // HITUNG MODEL PROB
-          if (usedEnsemble && cityData) {
-            const samples = await getEnsembleTemperatures(cityData, dateStr);
-            if (samples) {
-              modelProb = calculateProbabilityFromEnsemble(samples, rng[0], rng[1]);
-            } else {
-              modelProb = FALLBACK_CONFIDENCE;
-            }
-          } else {
-            modelProb = estimateModelProbability(forecastTemp, rng);
-          }
-          
-          matched = {
-            market,
-            question: market.question,
-            price: yesPrice,
-            range: rng
-          };
-          break;
-        }
-      }
-      if (!matched) { skip(`No bucket for ${forecastTemp}°${unit}`); continue; }
-      
-      const price = Number(matched.price);
-      if (isNaN(price)) { skip(`Invalid price`); continue; }
-      
-      const edge = modelProb - price;
-      
-      // FILTERS (LONGGAK)
-      if (edge < MIN_EDGE) {
-        skip(`Edge too low: ${(edge*100).toFixed(1)}% < ${MIN_EDGE*100}%`);
-        continue;
-      }
-      
-      if (modelProb < MIN_CONFIDENCE) {
-        skip(`Low confidence: ${(modelProb*100).toFixed(1)}% < ${MIN_CONFIDENCE*100}%`);
-        continue;
-      }
-      
-      if (nearBoundary(forecastTemp, matched.range[0], matched.range[1])) {
-        skip(`On boundary: ${forecastTemp}°F`);
-        continue;
-      }
-      
-      const tokenIdCheck = getYesTokenId(matched.market);
-      if (tokenIdCheck && mode !== "dry-run") {
-        const volume = await getMarketVolume(tokenIdCheck);
-        if (volume.volume24h < MIN_VOLUME_USD) {
-          skip(`Low volume: $${volume.volume24h.toFixed(0)} < $${MIN_VOLUME_USD}`);
+      for (const citySlug of activeLocations) {
+        if (!(citySlug in LOCATIONS)) continue;
+        const locData = LOCATIONS[citySlug as keyof typeof LOCATIONS];
+        const cityData = CITIES[citySlug];
+        const unit = cityData?.unit || 'F';
+        
+        // Correlation filter: skip if same region already open
+        const region = getRegion(citySlug);
+        if (openRegions.has(region)) {
+          skip(`${locData.name} (${region}) - already have position in this region`);
           continue;
         }
+        
+        for (let i = 0; i < 4; i++) {
+          const date = new Date(); date.setDate(date.getDate() + i);
+          const dateStr = date.toISOString().slice(0,10);
+          const month = MONTHS[date.getMonth()], day = date.getDate(), year = date.getFullYear();
+          
+          let forecastTemp: number | null = null;
+          let modelProb: number = 0.5;
+          let usedEnsemble = false;
+          
+          if (cityData && config.use_ensemble) {
+            const samples = await getEnsembleTemperatures(cityData, dateStr);
+            if (samples && samples.length) {
+              forecastTemp = samples.reduce((a,b) => a+b, 0) / samples.length;
+              forecastTemp = Math.round(forecastTemp * 10) / 10;
+              usedEnsemble = true;
+            }
+          }
+          
+          if (!forecastTemp) {
+            const forecast = await getForecast(citySlug);
+            forecastTemp = forecast[dateStr] || null;
+          }
+          
+          if (!forecastTemp) continue;
+          
+          const event = await getPolymarketEvent(citySlug, month, day, year);
+          if (!event) continue;
+          const hoursLeft = hoursUntilResolution(event);
+          
+          if (hoursLeft < MIN_HOURS_LIQUID) { continue; }
+          
+          let matched = null;
+          for (const market of event.markets ?? []) {
+            const rng = parseTempRange(market.question || "");
+            if (rng && rng[0] <= forecastTemp && forecastTemp <= rng[1]) {
+              let rawPrices = market.outcomePrices ?? "[0.5,0.5]";
+              let prices;
+              try {
+                prices = JSON.parse(rawPrices) as number[];
+              } catch {
+                prices = [0.5, 0.5];
+              }
+              const yesPrice = Number(prices[0]);
+              if (isNaN(yesPrice)) continue;
+              
+              if (usedEnsemble && cityData) {
+                const samples = await getEnsembleTemperatures(cityData, dateStr);
+                if (samples) {
+                  modelProb = calculateProbabilityFromEnsemble(samples, rng[0], rng[1]);
+                } else {
+                  modelProb = 0.68;
+                }
+              } else {
+                modelProb = estimateModelProbability(forecastTemp, rng);
+              }
+              
+              matched = {
+                market,
+                question: market.question,
+                price: yesPrice,
+                range: rng
+              };
+              break;
+            }
+          }
+          if (!matched) { continue; }
+          
+          const price = Number(matched.price);
+          if (isNaN(price)) { continue; }
+          
+          const edge = calculateEdge(modelProb, price);
+          const confidence = getConfidence(modelProb);
+          const edgeTier = getEdgeTier(edge);
+          
+          // Edge filter (min 7%)
+          if (edge < MIN_EDGE) {
+            continue;
+          }
+          
+          // Confidence filter (min 70%)
+          if (confidence < MIN_CONFIDENCE) {
+            continue;
+          }
+          
+          // Boundary filter
+          if (nearBoundary(forecastTemp, matched.range[0], matched.range[1])) {
+            continue;
+          }
+          
+          // Volume filter
+          const tokenIdCheck = getYesTokenId(matched.market);
+          if (tokenIdCheck && mode !== "dry-run") {
+            const volume = await getMarketVolume(tokenIdCheck);
+            if (volume.volume24h < MIN_VOLUME_USD) {
+              continue;
+            }
+          }
+          
+          // Get edge multiplier for position sizing
+          const edgeMultiplier = getEdgeMultiplier(edge);
+          
+          // Calculate position size with Confidence Kelly
+          let positionSize = calculatePositionSizeWithConfidenceKelly(
+            balanceRef.value,
+            modelProb,
+            price,
+            confidence,
+            mode,
+            losingStreak
+          );
+          
+          // Apply edge multiplier
+          positionSize = positionSize * edgeMultiplier;
+          positionSize = Math.min(positionSize, balanceRef.value * 0.05); // Max 5% absolute cap
+          
+          if (positionSize <= 0) continue;
+          
+          candidates.push({
+            marketId: matched.market.id,
+            tokenId: tokenIdCheck || undefined,
+            price,
+            modelProb,
+            edge,
+            spread: 0,
+            volume24h: tokenIdCheck ? (await getMarketVolume(tokenIdCheck)).volume24h : 0,
+            question: matched.question,
+            citySlug,
+            region,
+            forecastTemp,
+            confidence
+          });
+          
+          console.log(stat("Candidate", `${locData.name} edge=${(edge*100).toFixed(1)}% conf=${(confidence*100).toFixed(0)}% tier=${edgeTier}`, "green"));
+        }
       }
-      
-      const exposure = currentExposure(positions);
-      if (exposure > balanceRef.value * MAX_PORTFOLIO_EXPOSURE) {
-        skip(`Exposure cap: $${exposure.toFixed(2)}`);
-        continue;
-      }
-      
-      candidates.push({
-        marketId: matched.market.id,
-        tokenId: tokenIdCheck || undefined,
-        price,
-        modelProb,
-        edge,
-        question: matched.question,
-        citySlug,
-        forecastTemp,
-        matchedMarket: matched.market,
-        locName: locData.name
-      });
-      
-      console.log(stat("Candidate", `${locData.name} edge=${(edge*100).toFixed(1)}% conf=${(modelProb*100).toFixed(0)}%`, "green"));
     }
   }
   
-  // SORT by edge tertinggi
-  candidates.sort((a, b) => b.edge - a.edge);
-  const topCandidates = candidates.slice(0, config.max_trades_per_run);
+  // Rank and execute top candidates
+  const rankedCandidates = rankCandidates(candidates);
+  console.log(`\n${divider(`TOP ${rankedCandidates.length} CANDIDATES`, "green")}`);
   
-  console.log(`\n${divider(`TOP ${topCandidates.length} CANDIDATES`, "green")}`);
-  
-  for (const cand of topCandidates) {
+  for (const cand of rankedCandidates) {
     if (tradesExecuted >= config.max_trades_per_run) break;
     if (positions[cand.marketId]) continue;
     
-    const positionSize = calculatePositionSizeWithKelly(balanceRef.value, cand.modelProb, cand.price, mode, losingStreak);
-    const shares = positionSize / cand.price;
+    const edgeMultiplier = getEdgeMultiplier(cand.edge);
+    let positionSize = calculatePositionSizeWithConfidenceKelly(
+      balanceRef.value,
+      cand.modelProb,
+      cand.price,
+      cand.confidence,
+      mode,
+      losingStreak
+    );
+    positionSize = positionSize * edgeMultiplier;
+    positionSize = Math.min(positionSize, balanceRef.value * 0.05);
     
-    console.log(panel(`🔥 EXECUTE • Edge ${(cand.edge*100).toFixed(1)}%`, [
-      stat("Market", cand.locName, "cyan"),
+    if (positionSize <= 0) {
+      skip(`Position size too small for ${cand.citySlug}`);
+      continue;
+    }
+    
+    const shares = positionSize / cand.price;
+    const edgeTier = getEdgeTier(cand.edge);
+    
+    console.log(panel(`🔥 EXECUTE • Edge ${(cand.edge*100).toFixed(1)}% (${edgeTier})`, [
+      stat("Market", cand.citySlug, "cyan"),
       stat("Price", `$${cand.price.toFixed(3)}`, "green"),
       stat("Model Prob", `${(cand.modelProb*100).toFixed(1)}%`, "yellow"),
+      stat("Confidence", `${(cand.confidence*100).toFixed(0)}%`, "yellow"),
       stat("Size", `$${positionSize.toFixed(2)} (${((positionSize/balanceRef.value)*100).toFixed(1)}% of balance)`, "yellow"),
       stat("Stop loss", `$${(cand.price * (1 - STOP_LOSS_PCT)).toFixed(3)} (${STOP_LOSS_PCT*100}%)`, "red"),
-    ], "green"));
+      edgeMultiplier > 1 ? stat("Edge Boost", `${edgeMultiplier}x`, "green") : null,
+    ].filter(Boolean), "green"));
     
+    // Depth check
     if (cand.tokenId && mode !== "dry-run") {
       const requiredShares = positionSize / cand.price;
       const isLiquid = await isLiquidEnough(cand.tokenId, requiredShares, DEPTH_SLIPPAGE_TOL);
       if (!isLiquid) {
         skip(`Not liquid enough for ${requiredShares.toFixed(1)} shares`);
+        continue;
+      }
+      
+      const ba = await getBestBidAsk(cand.tokenId);
+      if (ba && ba.ask > cand.price * (1 + MAX_SLIPPAGE_PCT)) {
+        skip(`Best ask ${ba.ask.toFixed(4)} > ${MAX_SLIPPAGE_PCT*100}% above price`);
         continue;
       }
     }
@@ -589,7 +648,7 @@ export async function run(options: RunOptions): Promise<void> {
     sim.total_trades++;
     sim.trades.push({ type: "entry", question: cand.question, entry_price: cand.price, shares, cost: positionSize, opened_at: new Date().toISOString() });
     tradesExecuted++;
-    ok(`Position opened — $${positionSize.toFixed(2)}`);
+    ok(`Position opened — $${positionSize.toFixed(2)} (${((positionSize/balanceRef.value)*100).toFixed(1)}% of balance)`);
   }
   
   if (tradesExecuted === 0 && candidates.length === 0) skip("No candidates found");
@@ -607,5 +666,6 @@ export async function run(options: RunOptions): Promise<void> {
     stat("Trades", `${tradesExecuted}`, tradesExecuted > 0 ? "green" : "gray"),
     stat("Open", `${Object.keys(positions).length}`, "blue"),
     stat("Candidates", `${candidates.length}`, "yellow"),
+    stat("Losing streak", `${losingStreak}`, losingStreak >= 2 ? "red" : "yellow"),
   ], modeTone(mode)));
 }
