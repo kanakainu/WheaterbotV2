@@ -34,9 +34,9 @@ const TRAILING_ACTIVATE_PCT = 0.15;
 const TRAILING_RETRACE_PCT = 0.92;
 const MAX_SLIPPAGE_PCT = 0.03;
 const DEPTH_SLIPPAGE_TOL = 5;
-const MIN_EDGE = 0.08;
+const MIN_EDGE = 0.03;  // 3% (dari 8% - diturunkan untuk test)
 const MIN_HOURS_LIQUID = 2;
-const MIN_VOLUME_USD = 10000;
+const MIN_VOLUME_USD = 5000;  // Turunkan dari 10000
 
 const MIN_PAPER_ORDER_USD = 0.5;
 const MIN_EXECUTE_ORDER_USD = 1.0;
@@ -86,18 +86,40 @@ function getUnitDisplay(citySlug: string): string {
   return cityData?.unit || 'F';
 }
 
+// FIXED: Better estimateModelProbability
 function estimateModelProbability(forecastTemp: number, bucket: [number, number]): number {
-  const center = (bucket[0] + bucket[1]) / 2;
-  const dist = Math.abs(forecastTemp - center);
+  const low = bucket[0];
+  const high = bucket[1];
   
-  if (dist === 0) return 0.72;
-  if (dist <= 1) return 0.63;
-  if (dist <= 2) return 0.57;
-  return 0.50;
+  // Handle unlimited buckets
+  if (low === -999) {
+    // "or below" bucket
+    return Math.min(0.95, Math.max(0.05, 1 - (forecastTemp / high)));
+  }
+  if (high === 999) {
+    // "or higher" bucket
+    return Math.min(0.95, Math.max(0.05, forecastTemp / low));
+  }
+  
+  // Normal bucket (between)
+  const range = high - low;
+  const center = (low + high) / 2;
+  const distanceToCenter = Math.abs(forecastTemp - center);
+  
+  if (forecastTemp >= low && forecastTemp <= high) {
+    // Di dalam bucket: prob 0.6 - 0.9
+    return 0.6 + (0.3 * (1 - (distanceToCenter / (range / 2))));
+  } else {
+    // Di luar bucket: prob 0.1 - 0.4
+    const outsideDist = Math.min(Math.abs(forecastTemp - low), Math.abs(forecastTemp - high));
+    return Math.max(0.1, 0.4 - (outsideDist * 0.1));
+  }
 }
 
+// BOUNDARY FILTER DINONAKTIFKAN (dikomentari)
 function nearBoundary(temp: number, low: number, high: number): boolean {
-  return (temp - low < 0.5) || (high - temp < 0.5);
+  return false; // DI NONAKTIFKAN SEMENTARA
+  // return (temp - low < 0.5) || (high - temp < 0.5);
 }
 
 function currentExposure(positions: Record<string, PositionWithTracker>): number {
@@ -462,9 +484,10 @@ export async function run(options: RunOptions): Promise<void> {
         continue;
       }
       
+      // BOUNDARY FILTER DINONAKTIFKAN
       if (nearBoundary(forecastTemp, matched.range[0], matched.range[1])) {
-        skip(`Near boundary: ${forecastTemp}°F at edge of bucket`);
-        continue;
+        // skip(`Near boundary: ${forecastTemp}°F at edge of bucket`);
+        // DI-NONAKTIFKAN, TIDAK SKIP
       }
       
       const tokenIdCheck = getYesTokenId(matched.market);
