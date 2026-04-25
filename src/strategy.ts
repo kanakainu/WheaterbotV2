@@ -1,3 +1,5 @@
+// File: src/strategy.ts (LENGKAP - SUDAH DI-FIX UNTUK PAPER MODE BYPASS LIQUIDITY FILTER)
+
 import { buyYesLimit, getClobClient, sellYesLimit } from "./clob";
 import { BotConfig, getActiveLocations } from "./config";
 import { badge, C, divider, ok, panel, progressBar, skip, stat, warn } from "./colors";
@@ -22,7 +24,7 @@ import { CITIES } from "./cities";
 import { calculateEdge, getEdgeTier, getEdgeMultiplier, getConfidence, rankCandidates, AlphaCandidate, getRegion, isCorrelated, calculateLiquidityScore, getLiquidityTier } from "./alpha";
 
 // =============================================================================
-// ALPHA HUNTING MODE - SWEET SPOT CONFIG
+// ALPHA HUNTING MODE - SWEET SPOT CONFIG (Paper Bypass Liquidity & Volume)
 // =============================================================================
 
 const FALLBACK_POSITION_PCT = 0.02;
@@ -35,10 +37,10 @@ const MAX_SLIPPAGE_PCT = 0.05;
 const DEPTH_SLIPPAGE_TOL = 15;
 
 // ALPHA HUNTING THRESHOLDS (Loosened but not degenerate)
-const MIN_EDGE = 0.015;                        // 1.5% (bukan 1%)
+const MIN_EDGE = 0.015;                        // 1.5%
 const MIN_CONFIDENCE = 0.55;                   // 55%
 const MIN_VOLUME_USD = 500;                    // 500 (khusus live)
-const MAX_SPREAD_PERCENT = 0.05;               // 5% (bukan 6%)
+const MAX_SPREAD_PERCENT = 0.05;               // 5%
 const MIN_HOURS_LIQUID = 1;
 
 const MIN_PAPER_ORDER_USD = 0.5;
@@ -311,7 +313,7 @@ export async function showPositions(): Promise<void> {
 }
 
 // =============================================================================
-// MAIN RUN FUNCTION - ALPHA HUNTING MODE
+// MAIN RUN FUNCTION - ALPHA HUNTING MODE (PAPER BYPASS LIQUIDITY)
 // =============================================================================
 export async function run(options: RunOptions): Promise<void> {
   const { mode, config } = options;
@@ -575,14 +577,21 @@ export async function run(options: RunOptions): Promise<void> {
             }
           }
           
-          const depthUSDC = (bestPriceData?.askSize || 0) * (bestPriceData?.ask || price);
-          const liquidityMetrics = calculateLiquidityScore(depthUSDC, volume.volume24h, bestPriceData?.spreadPercent || 0.03);
-          
-          if (!liquidityMetrics.isLiquid && mode === "execute") {
-            console.log(`[DEBUG LIQ] ${citySlug}: score=${liquidityMetrics.totalScore} tier=${liquidityMetrics.isLiquid ? 'OK' : 'BAD'}`);
-            continue;
+          // ================= LIQUIDITY CHECK: PAPER MODE BYPASS =================
+          if (mode === "paper") {
+            // Paper mode: lewati liquidity filter
+            passedLiquidity++;
+          } else {
+            // Live/Execute mode: cek liquidity
+            const depthUSDC = (bestPriceData?.askSize || 0) * (bestPriceData?.ask || price);
+            const liquidityMetrics = calculateLiquidityScore(depthUSDC, volume.volume24h, bestPriceData?.spreadPercent || 0.03);
+            
+            if (!liquidityMetrics.isLiquid && mode === "execute") {
+              console.log(`[DEBUG LIQ] ${citySlug}: score=${liquidityMetrics.totalScore} tier=${liquidityMetrics.isLiquid ? 'OK' : 'BAD'}`);
+              continue;
+            }
+            passedLiquidity++;
           }
-          passedLiquidity++;
           
           const edgeMultiplier = getEdgeMultiplier(finalEdge);
           let positionSize = calculatePositionSizeWithConfidenceKelly(
@@ -603,9 +612,9 @@ export async function run(options: RunOptions): Promise<void> {
             spreadPercent: bestPriceData?.spreadPercent || 0,
             spreadScore: bestPriceData?.spreadScore || 0,
             volume24h: volume.volume24h,
-            depthUSDC,
-            liquidityScore: liquidityMetrics.totalScore,
-            liquidityTier: getLiquidityTier(liquidityMetrics.totalScore),
+            depthUSDC: 0,
+            liquidityScore: 0,
+            liquidityTier: 'Paper',
             question: matched.question,
             citySlug,
             region,
@@ -613,7 +622,7 @@ export async function run(options: RunOptions): Promise<void> {
             confidence
           });
           
-          console.log(stat("Candidate", `${locData.name} edge=${(finalEdge*100).toFixed(1)}% liq=${liquidityMetrics.totalScore} ${isDisagreementTrade ? '🔥CHAOS' : ''}`, "green"));
+          console.log(stat("Candidate", `${locData.name} edge=${(finalEdge*100).toFixed(1)}% ${isDisagreementTrade ? '🔥CHAOS' : ''}`, "green"));
         }
       }
     }
@@ -656,7 +665,7 @@ export async function run(options: RunOptions): Promise<void> {
       stat("Price", `$${cand.price.toFixed(3)}`, "green"),
       stat("Model Prob", `${(cand.modelProb*100).toFixed(1)}%`, "yellow"),
       stat("Confidence", `${(cand.confidence*100).toFixed(0)}%`, "yellow"),
-      stat("Liquidity", `${cand.liquidityTier} (${cand.liquidityScore})`, "green"),
+      stat("Liquidity", `${cand.liquidityTier}`, "green"),
       stat("Size", `$${positionSize.toFixed(2)} (${((positionSize/balanceRef.value)*100).toFixed(1)}% of balance)`, "yellow"),
       stat("Stop loss", `$${(cand.price * (1 - STOP_LOSS_PCT)).toFixed(3)} (${STOP_LOSS_PCT*100}%)`, "red"),
     ].filter(Boolean), "green"));
