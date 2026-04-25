@@ -1,228 +1,335 @@
-# Polymarket Weather Trading Bot
+# ✅ OK BRO! GUE KASIH README VERSI UPGRADE LENGKAP
 
-Node.js / TypeScript trading automation for Polymarket daily temperature markets. The bot combines National Weather Service (NWS) forecast data with Polymarket CLOB pricing: it maps a city’s forecast max temperature to a market bucket, then supports read-only signals, paper trading in a local JSON ledger, or live orders.
+Ini adalah README yang sudah diperbarui dengan **semua upgrade** yang lo lakukan: SQLite, Kelly Criterion, Stop Loss, Global Cities, Ensemble Forecast.
 
-## Overview
+---
+# 🌤️ WeatherBot V2 - Polymarket Weather Trading Bot
 
-The bot scans configured cities, finds the matching temperature range for the forecast, compares the YES price to entry and exit thresholds, and either prints signals, updates `simulation.json`, or posts real CLOB orders depending on the selected npm script. Runtime configuration is driven by `.env` (not `config.json` at execution time for the main flows described here).
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue.svg)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
+[![Polymarket](https://img.shields.io/badge/Polymarket-CLOB-purple.svg)](https://polymarket.com/)
+
+**Advanced weather trading bot for Polymarket** with Kelly Criterion position sizing, stop loss, trailing stop, global city support, and SQLite database for reliable state management.
 
 ---
 
-![Weather demo still](public/weather-profile.png)
+## ✨ Key Features
+
+| Feature | Description |
+|---------|-------------|
+| 🌍 **30+ Global Cities** | NYC, London, Tokyo, Seoul, Singapore, Paris, Berlin, and more |
+| 📊 **Kelly Criterion** | Optimal position sizing based on edge (Fractional Kelly 25%) |
+| 🛑 **Stop Loss (20%)** | Automatic loss protection |
+| 🎯 **Trailing Stop** | Lock in profits after 20% gain |
+| 🗄️ **SQLite Database** | Anti-corrupt state management (no more JSON file errors) |
+| 🔄 **Three Execution Modes** | Signal-only, Paper trading, Live CLOB trading |
+| 🌡️ **Open-Meteo Forecast** | Global weather data (ECMWF + GFS models) |
+| 🔬 **Ensemble Forecast (31-member)** | Probabilistic temperature predictions |
+| 📈 **Expected Value (EV) Filtering** | Only trade when EV > 5% |
 
 ---
 
-https://github.com/user-attachments/assets/a4940d4d-be6e-478b-b2ba-1c84ecaa5c74
-
----
-
-https://github.com/user-attachments/assets/70ef0168-1671-4057-bb4b-c3435016732b
-
----
-
-### Key features
-
-- **NWS-driven**: Uses NWS observations and forecast data to estimate daily max temperature.
-- **Bucket matching**: Picks the Polymarket outcome range that contains the forecast temperature.
-- **Three execution modes**: Signal-only, paper (simulated PnL in `simulation.json`), and live CLOB trading.
-- **Proxy wallet support**: MetaMask signer with Polymarket proxy funder when `USE_PROXY_WALLET` and `SIGNATURE_TYPE=2` are set.
-- **Recurring runs**: Optional `--interval` for scheduled live execution (see `npm run trade`).
-
-## Architecture
-
-### Technology stack
-
-- **Runtime**: Node.js, TypeScript
-- **Chain**: Polygon
-- **Execution**: Polymarket CLOB via `@polymarket/clob-client`
-- **Data**: NWS APIs for location-specific weather (see `src/nws.ts` and related modules)
-- **Config**: `.env` for secrets and strategy parameters; `config.json` is not used for runtime config in the primary flows documented below
-
-### System flow
-
-```
-NWS forecast + city list → Polymarket event for date
-→ Map temp to bucket → Compare YES to ENTRY_THRESHOLD / EXIT_THRESHOLD
-→ Signal | Update simulation | Place order
-```
-
-## Installation
+## 🚀 Quick Start
 
 ### Prerequisites
 
 - Node.js 18+ and npm
-- A wallet with USDC on Polymarket for live mode, with keys from environment only
-- NWS and Polymarket API reachability
+- Polymarket account with USDC on Polygon network (for live trading)
 
-### Setup
-
-1. **Clone the repository and enter the directory**
-
-   ```bash
-   git clone <repository-url>
-   cd Polymarket-Weather-Bot
-   ```
-
-2. **Install dependencies**
-
-   ```bash
-   npm install
-   ```
-
-3. **Configure environment**
-
-   ```bash
-   cp .env.sample .env
-   ```
-
-   Edit `.env`. Example:
-
-   ```env
-   POLYMARKET_PRIVATE_KEY=0xYOUR_METAMASK_PRIVATE_KEY
-   POLYMARKET_PROXY_WALLET_ADDRESS=0xYOUR_POLYMARKET_PROXY_WALLET
-   USE_PROXY_WALLET=true
-   SIGNATURE_TYPE=2
-   ENTRY_THRESHOLD=0.15
-   EXIT_THRESHOLD=0.45
-   MAX_TRADES_PER_RUN=5
-   MIN_HOURS_TO_RESOLUTION=2
-   LOCATIONS="nyc,chicago,miami,dallas,seattle,atlanta"
-   ```
-
-4. **Credentials**
-
-   For live trading, confirm the private key, proxy address, USDC balance, and Polymarket trading allowance. Test with `signal` and `paper` before `execute` / `trade`.
-
-## Configuration
-
-### Environment variables
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `POLYMARKET_PRIVATE_KEY` | string | **required** for live | MetaMask (or EOA) private key |
-| `POLYMARKET_PROXY_WALLET_ADDRESS` | string | **required** for live with proxy | Polymarket proxy funder from account settings |
-| `USE_PROXY_WALLET` | boolean | `false` (see code) | When `true`, use proxy; typically pair with `SIGNATURE_TYPE=2` |
-| `SIGNATURE_TYPE` | `0` \| `1` \| `2` | derived | `0` EOA, `1` Polymarket proxy, `2` Gnosis Safe / browser flow |
-| `ENTRY_THRESHOLD` | number | `0.15` | Buy when matching bucket YES is below this |
-| `EXIT_THRESHOLD` | number | `0.45` | Exit when held YES is above this |
-| `MAX_TRADES_PER_RUN` | number | `5` | Cap entries per run |
-| `MIN_HOURS_TO_RESOLUTION` | number | `2` | Skip markets resolving sooner than this |
-| `LOCATIONS` | string | multi-city | Comma-separated city keys to scan |
-
-### Supported cities (typical)
-
-`nyc`, `chicago`, `miami`, `dallas`, `seattle`, `atlanta` (see `LOCATIONS` and source for the authoritative list).
-
-## Usage
-
-### Build and run modes
-
-| Mode | Command | Real orders? |
-|------|---------|--------------|
-| Signal | `npm run signal` | No |
-| Paper | `npm run paper` | No (writes `simulation.json`) |
-| One-shot live | `npm run execute` | Yes |
-| Live on interval | `npm run trade` | Yes (30-minute interval) |
+### Installation
 
 ```bash
-npm run signal
-npm run paper
-npm run execute
-npm run trade
-```
-
-### Other scripts
-
-```bash
-npm run positions   # list open (paper) positions
-npm run reset       # reset simulation state
-```
-
-## Technical details
-
-### Entry logic (high level)
-
-1. Load forecast max temperature for each configured city and resolution window.
-2. Find the Polymarket market whose temperature bucket contains that value.
-3. If YES is below `ENTRY_THRESHOLD` and other guards pass (horizon, max trades, existing position), open.
-4. If already holding, exit when YES reaches `EXIT_THRESHOLD` (or per implementation in `src/strategy.ts`).
-
-### State
-
-- **Paper / simulation**: `simulation.json` tracks virtual balance and open legs (file is gitignored).
-
-## Project structure
-
-```
-Polymarket-Weather-Bot/
-├── public/
-│   ├── weather.png            # README / demo still (add asset)
-│   └── weather.mp4          # optional local demo
-├── src/
-│   ├── index.ts
-│   ├── config.ts
-│   ├── nws.ts
-│   ├── polymarket.ts
-│   ├── clob.ts
-│   ├── strategy.ts
-│   ├── simState.ts
-│   ├── walletBalance.ts
-│   ├── parsing.ts
-│   ├── time.ts
-│   └── colors.ts
-├── dist/                      # tsc output
-├── simulation.json            # local paper state (gitignored)
-├── package.json
-├── tsconfig.json
-├── .env.sample
-└── README.md
-```
-
-## API integration
-
-### CLOB
-
-Orders use `@polymarket/clob-client` with the configured signer and, when used, the Polymarket proxy as funder.
-
-### NWS
-
-Forecast and related endpoints are accessed from `src/nws.ts` and supporting modules; respect NWS terms of use and rate limits.
-
-## Monitoring and logging
-
-- Console output with chalk styling for readability.
-- Paper mode: inspect `simulation.json` and `npm run positions`.
-
-## Change history
-
-Worth tracking for this project:
-
-1. **Mode gating**: Always validate `signal` → `paper` → `execute` before scaling size.
-2. **simulation state**: Regenerated locally; not suitable for commit.
-
-## Risk considerations
-
-1. **Forecast error**: NWS data can disagree with the resolution source Polymarket uses.
-2. **Liquidity and slippage**: YES/NO books may be thin.
-3. **Time to resolution**: Short horizons increase sensitivity to price moves.
-4. **Live credentials**: A mistake in `POLYMARKET_*` or allowance can still move real funds.
-
-**Operational suggestions**: Run `signal` and `paper` first, use small size in `execute`, and monitor until you trust the end-to-end path.
-
-## Development
-
-```bash
+git clone https://github.com/kanakainu/WheaterbotV2.git
+cd WheaterbotV2
+npm install
 npm run build
-npm run signal
 ```
 
-## Support
+### Configuration
 
-Use repository issues for bugs and feature requests. For CLOB and proxy wallet behavior, refer to Polymarket’s official documentation.
+```bash
+cp .env.sample .env
+```
+
+Edit `.env` with your settings:
+
+```env
+# Required for live trading
+POLYMARKET_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
+POLYMARKET_PROXY_WALLET_ADDRESS=0xYOUR_WALLET_ADDRESS
+
+# Trading parameters
+ENTRY_THRESHOLD=0.25
+EXIT_THRESHOLD=0.55
+MAX_TRADES_PER_RUN=3
+MIN_HOURS_TO_RESOLUTION=2
+
+# Risk management (Kelly, Stop Loss)
+KELLY_FRACTION=0.25
+STOP_LOSS_PCT=0.20
+TRAILING_ACTIVATE_PCT=0.20
+MAX_POSITION_PCT=0.15
+MIN_EV=0.05
+USE_KELLY=true
+
+# Cities to scan (comma-separated)
+LOCATIONS=nyc,chicago,miami,dallas,seattle,atlanta,london,tokyo,seoul,singapore,paris
+```
 
 ---
 
-**Disclaimer**: This software is provided as-is, without warranty. Prediction markets and digital assets involve substantial risk of loss. Use only capital you can afford to lose and comply with applicable laws in your jurisdiction.
+## 📋 Usage
 
-**Version**: 1.0.0  
-**Last updated**: April 2026
+### Build and Run Modes
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| **Signal** | `npm run signal` | Dry run, shows signals only |
+| **Paper** | `npm run paper` | Paper trading with virtual balance (SQLite) |
+| **Live (one-shot)** | `npm run execute` | Real CLOB orders, single run |
+| **Live (interval)** | `npm run trade` | Real orders every 30 minutes |
+
+### Utility Commands
+
+```bash
+npm run positions   # View open positions
+npm run reset       # Reset paper simulation to $200
+npm run db-reset    # Clear SQLite database completely
+```
+
+---
+
+## 🗄️ State Management (SQLite)
+
+**No more `simulation.json` corruption!** All positions and trades are stored in SQLite database:
+
+```
+data/live.db
+├── positions   (open positions)
+├── trades      (trade history)
+└── state       (balance, wins, losses)
+```
+
+### Database Features
+
+- ✅ **ACID compliant** - No corruption on crash
+- ✅ **Concurrent access** - Safe for multiple processes
+- ✅ **Easy backup** - Just copy `data/live.db`
+
+---
+
+## 🌍 Supported Cities
+
+The bot supports **30+ global cities** with automatic unit conversion (°F/°C):
+
+| Region | Cities |
+|--------|--------|
+| 🇺🇸 USA | NYC, Chicago, Miami, Dallas, Seattle, Atlanta |
+| 🇪🇺 Europe | London, Paris, Berlin, Munich, Zurich, Madrid, Milan, Istanbul |
+| 🌏 Asia | Tokyo, Seoul, Shanghai, Singapore, Hong Kong, Bangkok |
+| 🇦🇺 Oceania | Sydney, Melbourne, Wellington |
+
+Add any city to `LOCATIONS` in `.env` - the bot will automatically fetch forecasts.
+
+---
+
+## 📊 Risk Management Features
+
+### Kelly Criterion Position Sizing
+
+The bot uses **Fractional Kelly (25%)** to calculate optimal position size:
+
+```
+Position % = min( (p * b - q) / b * 0.25, 15% of balance )
+```
+
+### Stop Loss (20%)
+
+Automatically closes position if price drops 20% from entry price.
+
+### Trailing Stop
+
+Activates after 20% profit, locks in gains by moving stop loss up with the price:
+
+- Trail retracement: 15% from peak
+- Never goes below breakeven
+
+### Expected Value (EV) Filtering
+
+Only enters trades with EV > 5%:
+
+```
+EV = p * (1/price - 1) - (1-p)
+```
+
+---
+
+## 🏗️ Architecture
+
+### Technology Stack
+
+| Component | Technology |
+|-----------|------------|
+| Runtime | Node.js + TypeScript |
+| Blockchain | Polygon |
+| Exchange | Polymarket CLOB (`@polymarket/clob-client`) |
+| Weather API | Open-Meteo (ECMWF + GFS) |
+| Database | SQLite3 (`better-sqlite3`) |
+| Forecasts | NWS (US) + Open-Meteo (Global) |
+
+### Project Structure
+
+```
+WheaterbotV2/
+├── src/
+│   ├── index.ts           # CLI entry point
+│   ├── config.ts          # Configuration loader
+│   ├── strategy.ts        # Main trading logic
+│   ├── risk.ts            # Kelly, Stop Loss, Trailing
+│   ├── forecast.ts        # Global weather forecasts
+│   ├── forecast-ensemble.ts # 31-member GFS ensemble
+│   ├── clob.ts            # Polymarket CLOB integration
+│   ├── polymarket.ts      # Gamma API wrapper
+│   ├── db.ts              # SQLite database layer
+│   ├── simState.ts        # State management (SQLite)
+│   ├── cities.ts          # 30+ global cities data
+│   ├── nws.ts             # US cities (legacy)
+│   ├── parsing.ts         # Temperature bucket parser
+│   ├── time.ts            # Month utilities
+│   ├── colors.ts          # Terminal styling
+│   └── walletBalance.ts   # USDC balance checker
+├── data/
+│   └── live.db            # SQLite database
+├── dist/                  # Compiled JavaScript
+├── .env                   # Configuration (gitignored)
+├── package.json
+└── README.md
+```
+
+---
+
+## 🧪 Testing
+
+### Paper Trading (Recommended First)
+
+```bash
+npm run paper
+```
+
+This runs with virtual $200 balance and SQLite database. Monitor positions with:
+
+```bash
+npm run positions
+```
+
+### Live Trading (After Paper Success)
+
+1. Fund Polymarket account with USDC on Polygon network
+2. Set `POLYMARKET_PRIVATE_KEY` and `POLYMARKET_PROXY_WALLET_ADDRESS` in `.env`
+3. Start with small amount ($50-100):
+
+```bash
+npm run execute
+```
+
+---
+
+## 📈 Example Output
+
+```
+╭──────────────────────────────────────────────────────────────────────────╮
+│ Weather Trading Bot (UPGRADED)                                           │
+├──────────────────────────────────────────────────────────────────────────┤
+│  PAPER TRADING                                                           │
+│ Balance          $200.00                                                 │
+│ Position sizing  25% Kelly                                               │
+│ Stop loss        20%                                                     │
+│ Entry threshold  < $0.25                                                 │
+╰──────────────────────────────────────────────────────────────────────────╯
+
+╭──────────────────────────────────────────────────────────────────────────╮
+│ Entry Signal • New York City                                             │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Price            $0.230                                                  │
+│ Size             $30.00 (15.0% of balance)                               │
+│ Stop loss        $0.184 (20%)                                            │
+╰──────────────────────────────────────────────────────────────────────────╯
+```
+
+---
+
+## ⚠️ Risk Disclaimer
+
+This software is provided **as-is**, without warranty. Prediction markets involve substantial risk of loss.
+
+**Always:**
+- Test with paper trading first
+- Start with small amounts ($50-100)
+- Never risk more than you can afford to lose
+- Use stop losses (already built-in)
+
+---
+
+## 🔧 Troubleshooting
+
+### Error: `Cannot read properties of null`
+
+**Solution:** Run `npm run db-reset` to reset SQLite database.
+
+### Error: `no such column "balance"`
+
+**Solution:** Delete `data/live.db` and run `npm run db-reset`.
+
+### Bot not opening positions
+
+**Solution:** Check `ENTRY_THRESHOLD` in `.env` - try increasing to `0.30` if market prices are high.
+
+### Live trading not working
+
+**Solution:** Verify:
+- USDC balance in wallet (`npm run execute` shows balance)
+- Private key is correct (64 hex characters with 0x prefix)
+- Proxy wallet address is correct
+
+---
+
+## 📝 Change Log
+
+### Version 2.0 (April 2026)
+
+- ✅ Migrated from JSON to **SQLite database** (no more corruption)
+- ✅ Added **Kelly Criterion** position sizing
+- ✅ Added **Stop Loss (20%)** and **Trailing Stop**
+- ✅ Added **30+ global cities** (Open-Meteo API)
+- ✅ Added **Ensemble Forecast** (31-member GFS)
+- ✅ Added **Expected Value (EV) filtering**
+- ✅ Fixed unit conversion (°F/°C for international cities)
+- ✅ Added `--db-reset` command
+- ✅ Improved error handling
+
+### Version 1.0 (March 2026)
+
+- Initial release with NWS forecast (US only)
+- Paper trading with JSON state
+- Basic entry/exit thresholds
+
+---
+
+## 📄 License
+
+MIT
+
+---
+
+## 🙏 Acknowledgments
+
+- [Polymarket CLOB](https://docs.polymarket.com/) for trading infrastructure
+- [Open-Meteo](https://open-meteo.com/) for free global weather API
+- [@polymarket/clob-client](https://www.npmjs.com/package/@polymarket/clob-client) for TypeScript SDK
+
+---
+
+**Built with ❤️ for Polymarket weather markets**
+
+*Last updated: April 2026*
