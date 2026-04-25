@@ -1,7 +1,7 @@
 import { buyYesLimit, getClobClient, sellYesLimit } from "./clob";
 import { BotConfig, getActiveLocations } from "./config";
 import { badge, C, divider, ok, panel, progressBar, skip, stat, warn } from "./colors";
-import { DailyForecast, getForecast, getCityData } from "./forecast";
+import { DailyForecast, getForecast } from "./forecast";
 import { getEnsembleTemperatures, calculateProbabilityFromEnsemble, isConfidentEnough } from "./forecast-ensemble";
 import { LOCATIONS } from "./nws";
 import { hoursUntilResolution, parseTempRange } from "./parsing";
@@ -19,23 +19,24 @@ import { calculateKellyPosition, calculateStopLoss, isStopLossHit, adjustForDraw
 import { isLiquidEnough, getBestBidAsk, getMarketVolume } from "./depth";
 import { notifyTrade, notifyError } from "./notify";
 import { rankCandidates, AlphaCandidate, getConfidence } from "./alpha";
+import { CITIES } from "./cities";
 
 // =============================================================================
 // PARAMETER & INTERFACE (UPGRADED)
 // =============================================================================
 
-const FALLBACK_POSITION_PCT = 0.03;      // 3% fallback
+const FALLBACK_POSITION_PCT = 0.03;
 const KELLY_FRACTION = 0.25;
-const MAX_POSITION_PCT = 0.05;            // 5% max per trade
-const MAX_PORTFOLIO_EXPOSURE = 0.30;       // Max 30% total exposure
-const STOP_LOSS_PCT = 0.15;               // 15% stop loss
-const TRAILING_ACTIVATE_PCT = 0.15;       // Aktif setelah profit 15%
-const TRAILING_RETRACE_PCT = 0.92;        // Trail 8% dari peak
-const MAX_SLIPPAGE_PCT = 0.03;            // 3% slippage tolerance
-const DEPTH_SLIPPAGE_TOL = 5;             // 5% depth tolerance
-const MIN_EDGE = 0.08;                    // Minimum edge 8% (dari 5%)
+const MAX_POSITION_PCT = 0.05;
+const MAX_PORTFOLIO_EXPOSURE = 0.30;
+const STOP_LOSS_PCT = 0.15;
+const TRAILING_ACTIVATE_PCT = 0.15;
+const TRAILING_RETRACE_PCT = 0.92;
+const MAX_SLIPPAGE_PCT = 0.03;
+const DEPTH_SLIPPAGE_TOL = 5;
+const MIN_EDGE = 0.08;
 const MIN_HOURS_LIQUID = 2;
-const MIN_VOLUME_USD = 10000;              // Minimal volume $10k
+const MIN_VOLUME_USD = 10000;
 
 const MIN_PAPER_ORDER_USD = 0.5;
 const MIN_EXECUTE_ORDER_USD = 1.0;
@@ -81,13 +82,10 @@ function shortQuestion(question: string, max = 62): string {
 }
 
 function getUnitDisplay(citySlug: string): string {
-  const cityInfo = getCityData(citySlug);
-  return cityInfo?.unit || 'F';
+  const cityData = CITIES[citySlug];
+  return cityData?.unit || 'F';
 }
 
-/**
- * Estimate model probability based on forecast distance to bucket center
- */
 function estimateModelProbability(forecastTemp: number, bucket: [number, number]): number {
   const center = (bucket[0] + bucket[1]) / 2;
   const dist = Math.abs(forecastTemp - center);
@@ -98,16 +96,10 @@ function estimateModelProbability(forecastTemp: number, bucket: [number, number]
   return 0.50;
 }
 
-/**
- * Check if forecast is near bucket boundary (0.5°F from edge)
- */
 function nearBoundary(temp: number, low: number, high: number): boolean {
   return (temp - low < 0.5) || (high - temp < 0.5);
 }
 
-/**
- * Hitung total exposure dari semua posisi terbuka
- */
 function currentExposure(positions: Record<string, PositionWithTracker>): number {
   return Object.values(positions).reduce((sum, p) => sum + (p.cost || 0), 0);
 }
@@ -129,7 +121,6 @@ function calculatePositionSizeWithKelly(
   
   positionPct = Math.min(positionPct, MAX_POSITION_PCT);
   
-  // Apply drawdown adjustment
   let positionSize = balance * positionPct;
   positionSize = adjustForDrawdown(positionSize, losingStreak);
   
@@ -140,7 +131,7 @@ function calculatePositionSizeWithKelly(
 }
 
 // =============================================================================
-// EXIT LOGIC (with upgraded trailing)
+// EXIT LOGIC
 // =============================================================================
 async function checkAndExecuteExit(
   marketId: string,
@@ -163,7 +154,7 @@ async function checkAndExecuteExit(
     console.log(`[TRAILING] ${pos.question.slice(0,40)}... peak: $${pos.highestPrice.toFixed(4)}`);
   }
   
-  // STOP LOSS (15%)
+  // STOP LOSS
   if (isStopLossHit(entryPrice, currentPrice)) {
     const loss = (currentPrice - entryPrice) * pos.shares;
     console.log(panel(`🛑 STOP LOSS • ${shortQuestion(pos.question, 56)}`, [
@@ -199,7 +190,7 @@ async function checkAndExecuteExit(
     return true;
   }
   
-  // TRAILING STOP (trail 8%)
+  // TRAILING STOP
   const activateThreshold = entryPrice * (1 + TRAILING_ACTIVATE_PCT);
   const isTrailingActive = pos.trailingActive === true;
   
@@ -297,7 +288,7 @@ export async function showPositions(): Promise<void> {
 }
 
 // =============================================================================
-// MAIN RUN FUNCTION (UPGRADED: edge-based, ranked)
+// MAIN RUN FUNCTION
 // =============================================================================
 export async function run(options: RunOptions): Promise<void> {
   const { mode, config } = options;
@@ -314,7 +305,6 @@ export async function run(options: RunOptions): Promise<void> {
     }
   }
 
-  // Calculate losing streak from last 10 trades
   const lastTrades = sim.trades.slice(-10);
   let losingStreak = 0;
   for (let i = lastTrades.length - 1; i >= 0; i--) {
@@ -332,7 +322,7 @@ export async function run(options: RunOptions): Promise<void> {
   ], modeTone(mode)));
 
   if (mode !== "dry-run" && losingStreak >= 10) {
-    warn("Losing streak >= 10, halting bot to preserve capital");
+    warn("Losing streak >= 10, halting bot");
     return;
   }
 
@@ -377,9 +367,7 @@ export async function run(options: RunOptions): Promise<void> {
   }
   if (!exitsFound) skip("No exit opportunities");
 
-  // =========================================================================
-  // ENTRY SCAN - EDGE-BASED (UPGRADED)
-  // =========================================================================
+  // ENTRY SCAN - EDGE BASED
   console.log(`\n${divider("ENTRY SCAN (Alpha Ranking)", "cyan")}`);
   const activeLocations = getActiveLocations(config);
   const candidates: AlphaCandidate[] = [];
@@ -387,7 +375,7 @@ export async function run(options: RunOptions): Promise<void> {
   for (const citySlug of activeLocations) {
     if (!(citySlug in LOCATIONS)) continue;
     const locData = LOCATIONS[citySlug as keyof typeof LOCATIONS];
-    const cityData = getCityData(citySlug);
+    const cityData = CITIES[citySlug];
     const unit = cityData?.unit || 'F';
     
     for (let i = 0; i < 4; i++) {
@@ -395,15 +383,12 @@ export async function run(options: RunOptions): Promise<void> {
       const dateStr = date.toISOString().slice(0,10);
       const month = MONTHS[date.getMonth()], day = date.getDate(), year = date.getFullYear();
       
-      // Get forecast using ensemble if available
       let forecastTemp: number | null = null;
       let modelProb: number = 0.5;
       
       if (cityData && config.use_ensemble) {
         const samples = await getEnsembleTemperatures(cityData, dateStr);
         if (samples && samples.length) {
-          // Need to find matching bucket first - will get bucket later
-          // For now, we'll get the mean temp
           forecastTemp = samples.reduce((a,b) => a+b, 0) / samples.length;
           forecastTemp = Math.round(forecastTemp * 10) / 10;
         }
@@ -441,7 +426,6 @@ export async function run(options: RunOptions): Promise<void> {
           const yesPrice = Number(prices[0]);
           if (isNaN(yesPrice)) continue;
           
-          // Calculate model probability (prioritize ensemble)
           if (cityData && config.use_ensemble) {
             const samples = await getEnsembleTemperatures(cityData, dateStr);
             if (samples) {
@@ -467,63 +451,56 @@ export async function run(options: RunOptions): Promise<void> {
       const price = Number(matched.price);
       if (isNaN(price)) { skip(`Invalid price`); continue; }
       
-      // === EDGE-BASED FILTER (BUKAN PRICE-BASED) ===
       const edge = modelProb - price;
       if (edge < MIN_EDGE) {
         skip(`Edge too low: ${(edge*100).toFixed(1)}% < ${MIN_EDGE*100}%`);
         continue;
       }
       
-      // === CONFIDENCE FILTER ===
       if (!isConfidentEnough(modelProb)) {
         skip(`Low confidence: ${(modelProb*100).toFixed(1)}% < 62%`);
         continue;
       }
       
-      // === BOUNDARY FILTER ===
       if (nearBoundary(forecastTemp, matched.range[0], matched.range[1])) {
         skip(`Near boundary: ${forecastTemp}°F at edge of bucket`);
         continue;
       }
       
-      // === VOLUME FILTER ===
-      const tokenId = getYesTokenId(matched.market);
-      if (tokenId && mode !== "dry-run") {
-        const volume = await getMarketVolume(tokenId);
+      const tokenIdCheck = getYesTokenId(matched.market);
+      if (tokenIdCheck && mode !== "dry-run") {
+        const volume = await getMarketVolume(tokenIdCheck);
         if (volume.volume24h < MIN_VOLUME_USD) {
           skip(`Low volume: $${volume.volume24h.toFixed(0)} < $${MIN_VOLUME_USD}`);
           continue;
         }
       }
       
-      // === SPREAD FILTER (via bestBidAsk) ===
-      if (tokenId && mode !== "dry-run") {
-        const ba = await getBestBidAsk(tokenId);
+      if (tokenIdCheck && mode !== "dry-run") {
+        const ba = await getBestBidAsk(tokenIdCheck);
         if (!ba || ba.spread > 0.04) {
           skip(`Wide spread: ${ba ? (ba.spread*100).toFixed(1) : 'N/A'}%`);
           continue;
         }
       }
       
-      // === EXPOSURE CAP ===
       const exposure = currentExposure(positions);
       if (exposure > balanceRef.value * MAX_PORTFOLIO_EXPOSURE) {
         skip(`Exposure cap: $${exposure.toFixed(2)} > $${(balanceRef.value * MAX_PORTFOLIO_EXPOSURE).toFixed(2)}`);
         continue;
       }
       
-      // === CANDIDATE FOR RANKING ===
       const confidence = getConfidence(modelProb);
-      const spread = tokenId ? (await getBestBidAsk(tokenId))?.spread || 0.02 : 0.02;
+      const spread = tokenIdCheck ? (await getBestBidAsk(tokenIdCheck))?.spread || 0.02 : 0.02;
       
       candidates.push({
         marketId: matched.market.id,
-        tokenId: tokenId || undefined,
+        tokenId: tokenIdCheck || undefined,
         price,
         modelProb,
         edge,
         spread,
-        volume24h: tokenId ? (await getMarketVolume(tokenId)).volume24h : 0,
+        volume24h: tokenIdCheck ? (await getMarketVolume(tokenIdCheck)).volume24h : 0,
         question: matched.question,
         citySlug,
         forecastTemp,
@@ -534,7 +511,6 @@ export async function run(options: RunOptions): Promise<void> {
     }
   }
   
-  // === RANK CANDIDATES AND EXECUTE TOP 2 ===
   const rankedCandidates = rankCandidates(candidates);
   console.log(`\n${divider(`TOP ${rankedCandidates.length} CANDIDATES`, "green")}`);
   
@@ -553,7 +529,6 @@ export async function run(options: RunOptions): Promise<void> {
       stat("Stop loss", `$${(cand.price * (1 - STOP_LOSS_PCT)).toFixed(3)} (${STOP_LOSS_PCT*100}%)`, "red"),
     ], "green"));
     
-    // === DEPTH CHECK BEFORE EXECUTION ===
     if (cand.tokenId && mode !== "dry-run") {
       const requiredShares = positionSize / cand.price;
       const isLiquid = await isLiquidEnough(cand.tokenId, requiredShares, DEPTH_SLIPPAGE_TOL);
@@ -569,7 +544,6 @@ export async function run(options: RunOptions): Promise<void> {
       }
     }
     
-    // === TELEGRAM NOTIFICATION ===
     if (mode !== "dry-run") {
       await notifyTrade('buy', {
         question: cand.question,
@@ -579,11 +553,10 @@ export async function run(options: RunOptions): Promise<void> {
       });
     }
     
-    // === EXECUTE ===
     if (mode === "execute" && clob && cand.tokenId) {
       try {
         await buyYesLimit(clob, cand.tokenId, Math.min(cand.price + 0.03, 0.99), shares);
-        ok(`CLOB buy order submitted @ limit $${Math.min(cand.price + 0.03, 0.99).toFixed(3)}`);
+        ok(`CLOB buy order submitted`);
       } catch (e) {
         warn(`CLOB buy failed: ${String(e)}`);
         continue;
@@ -608,11 +581,10 @@ export async function run(options: RunOptions): Promise<void> {
     sim.total_trades++;
     sim.trades.push({ type: "entry", question: cand.question, entry_price: cand.price, shares, cost: positionSize, opened_at: new Date().toISOString() });
     tradesExecuted++;
-    ok(`Position opened — $${positionSize.toFixed(2)} (${((positionSize/(balanceRef.value+positionSize))*100).toFixed(1)}% of balance)`);
+    ok(`Position opened — $${positionSize.toFixed(2)}`);
   }
   
   if (tradesExecuted === 0 && candidates.length === 0) skip("No candidates found");
-  else if (tradesExecuted === 0 && candidates.length > 0) skip("Candidates filtered by ranking");
   
   if (persist) {
     sim.balance = Number(balanceRef.value.toFixed(2));
