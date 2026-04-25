@@ -37,7 +37,7 @@ export interface BotConfig {
 export const DEFAULT_CONFIG: BotConfig = {
   // Config Lama
   entry_threshold: 0.15,
-  exit_threshold: 0.45,
+  exit_threshold: 0.60,
   max_trades_per_run: 5,
   min_hours_to_resolution: 2,
   locations: "nyc,chicago,miami,dallas,seattle,atlanta",
