@@ -13,10 +13,28 @@ import {
 import { Position, Trade, loadSim, saveSim } from "./simState";
 import { MONTHS } from "./time";
 import type { ClobClient } from "@polymarket/clob-client";
+import { calculateKellyPosition, calculateStopLoss, isStopLossHit, updateTrailingStop } from "./risk";
 
-const POSITION_PCT = 0.05;
+// =============================================================================
+// KOMBINASI DARI BOT LAMA (PYTHON V2) + BOT BARU (TS)
+// Kelly Criterion, Stop Loss, Trailing Stop
+// =============================================================================
+
+// BASE POSITION PERSENTAGE (FALLBACK KALO KELLY GAGAL)
+const FALLBACK_POSITION_PCT = 0.05;  // 5% dari balance (sama kaya default)
 const MIN_PAPER_ORDER_USD = 0.5;
 const MIN_EXECUTE_ORDER_USD = 1.0;
+
+// PARAMETER DARI BOT LAMA LO
+const KELLY_FRACTION = 0.25;        // Fractional Kelly (25% dari full Kelly)
+const STOP_LOSS_PCT = 0.20;          // Stop loss 20% dari entry
+const PROFIT_TARGET = 0.55;          // Target profit $0.55 (dari exit threshold)
+const TRAILING_ACTIVATE_PCT = 0.20;   // Aktifin trailing setelah profit 20%
+
+// Interface buat nampung highest price per posisi (buat trailing stop)
+interface PositionWithTracker extends Position {
+  highestPrice?: number;  // Harga tertinggi yang pernah tercapai
+}
 
 export type TradeMode = "dry-run" | "paper" | "execute";
 
@@ -53,6 +71,172 @@ function shortQuestion(question: string, max = 62): string {
   return question.length > max ? `${question.slice(0, max - 1)}…` : question;
 }
 
+// =============================================================================
+// FUNCTION BUAT NGHITUNG POSITION SIZE PAKE KELLY (DARI BOT LAMA)
+// =============================================================================
+function calculatePositionSizeWithKelly(
+  balance: number,
+  probability: number,  // Probabilitas menang dari forecast (0-1)
+  price: number,        // Harga YES saat ini
+  mode: TradeMode
+): number {
+  // Pake Kelly dari bot lama lo
+  const kellyPercent = calculateKellyPosition(probability, price, KELLY_FRACTION);
+  
+  // Kalo Kelly gagal atau hasilnya 0, pake fallback 5%
+  let positionPct = kellyPercent;
+  if (positionPct <= 0 || !isFinite(positionPct)) {
+    positionPct = FALLBACK_POSITION_PCT;
+    warn(`Kelly returned ${kellyPercent}, falling back to ${FALLBACK_POSITION_PCT * 100}%`);
+  }
+  
+  // Batasin maksimum 15% dari balance (biar gak all-in)
+  positionPct = Math.min(positionPct, 0.15);
+  
+  const minOrderUsd = mode === "execute" ? MIN_EXECUTE_ORDER_USD : MIN_PAPER_ORDER_USD;
+  let positionSize = balance * positionPct;
+  
+  // Minimal order size
+  if (positionSize < minOrderUsd) {
+    positionSize = minOrderUsd;
+  }
+  
+  return Number(positionSize.toFixed(2));
+}
+
+// =============================================================================
+// FUNCTION BUAT NGE-CHECK EXIT (STOP LOSS + TAKE PROFIT + TRAILING)
+// DARI BOT LAMA LO
+// =============================================================================
+async function checkAndExecuteExit(
+  marketId: string,
+  pos: PositionWithTracker,
+  currentPrice: number,
+  mode: TradeMode,
+  clob: ClobClient | undefined,
+  balanceRef: { value: number },
+  sim: any,
+  positions: Record<string, PositionWithTracker>
+): Promise<boolean> {
+  const entryPrice = pos.entry_price;
+  
+  // Inisialisasi highestPrice kalo belum ada (buat trailing stop)
+  if (pos.highestPrice === undefined) {
+    pos.highestPrice = entryPrice;
+  }
+  
+  // Update highest price kalo harga lagi naik
+  if (currentPrice > pos.highestPrice) {
+    pos.highestPrice = currentPrice;
+  }
+  
+  // CEK STOP LOSS (20% dari entry price)
+  if (isStopLossHit(entryPrice, currentPrice)) {
+    const loss = (currentPrice - entryPrice) * pos.shares;
+    console.log(
+      panel(
+        `🛑 STOP LOSS • ${shortQuestion(pos.question, 56)}`,
+        [
+          stat("Entry price", `$${entryPrice.toFixed(3)}`, "cyan"),
+          stat("Stop price", `$${calculateStopLoss(entryPrice).toFixed(3)}`, "red"),
+          stat("Current price", `$${currentPrice.toFixed(3)}`, "red"),
+          stat("Loss", `-$${Math.abs(loss).toFixed(2)}`, "red"),
+          `${C.DIM("Stop reason")}   Price dropped ${STOP_LOSS_PCT * 100}% from entry`
+        ],
+        "red"
+      )
+    );
+    
+    // Eksekusi jual (paper atau live)
+    if (mode === "execute" && clob && pos.token_id) {
+      try {
+        const sellPx = Math.max(currentPrice - 0.01, 0.01);
+        await sellYesLimit(clob, pos.token_id, sellPx, pos.shares);
+        ok("CLOB sell order submitted (stop loss)");
+      } catch (e) {
+        warn(`CLOB sell failed: ${String(e)}`);
+        return false;
+      }
+    }
+    
+    // Update balance & state
+    const exitPnl = (currentPrice - entryPrice) * pos.shares;
+    balanceRef.value += pos.cost + exitPnl;
+    if (exitPnl > 0) sim.wins += 1;
+    else sim.losses += 1;
+    
+    const trade: Trade = {
+      type: "exit",
+      question: pos.question,
+      entry_price: entryPrice,
+      exit_price: currentPrice,
+      pnl: Number(exitPnl.toFixed(2)),
+      cost: pos.cost,
+      closed_at: new Date().toISOString()
+    };
+    sim.trades.push(trade);
+    delete positions[marketId];
+    
+    ok(`Stop loss closed — PnL: ${exitPnl >= 0 ? "+" : ""}${exitPnl.toFixed(2)}`);
+    return true;
+  }
+  
+  // CEK TRAILING STOP (DARI BOT LAMA LO)
+  // Aktif kalo udah profit 20% dari entry
+  if (currentPrice >= entryPrice * (1 + TRAILING_ACTIVATE_PCT)) {
+    const newStop = updateTrailingStop(entryPrice, currentPrice, pos.highestPrice!);
+    if (newStop !== null && currentPrice <= newStop) {
+      const profit = (currentPrice - entryPrice) * pos.shares;
+      console.log(
+        panel(
+          `🎯 TRAILING STOP • ${shortQuestion(pos.question, 56)}`,
+          [
+            stat("Entry price", `$${entryPrice.toFixed(3)}`, "cyan"),
+            stat("Peak price", `$${pos.highestPrice!.toFixed(3)}`, "green"),
+            stat("Exit price", `$${currentPrice.toFixed(3)}`, "yellow"),
+            stat("Profit", `+$${profit.toFixed(2)}`, "green"),
+            `${C.DIM("Stop reason")}   Trailing from peak (15% retracement)`
+          ],
+          "green"
+        )
+      );
+      
+      if (mode === "execute" && clob && pos.token_id) {
+        try {
+          const sellPx = Math.max(currentPrice - 0.01, 0.01);
+          await sellYesLimit(clob, pos.token_id, sellPx, pos.shares);
+          ok("CLOB sell order submitted (trailing stop)");
+        } catch (e) {
+          warn(`CLOB sell failed: ${String(e)}`);
+          return false;
+        }
+      }
+      
+      balanceRef.value += pos.cost + profit;
+      sim.wins += 1;
+      const trade: Trade = {
+        type: "exit",
+        question: pos.question,
+        entry_price: entryPrice,
+        exit_price: currentPrice,
+        pnl: Number(profit.toFixed(2)),
+        cost: pos.cost,
+        closed_at: new Date().toISOString()
+      };
+      sim.trades.push(trade);
+      delete positions[marketId];
+      
+      ok(`Trailing stop closed — Profit: +$${profit.toFixed(2)}`);
+      return true;
+    }
+  }
+  
+  return false; // Belum kena exit
+}
+
+// =============================================================================
+// SHOW POSITIONS (UDH MODIF NAMPILIN TRAILING & STOP)
+// =============================================================================
 export async function showPositions(): Promise<void> {
   const sim = await loadSim();
   const positions = sim.positions;
@@ -76,17 +260,27 @@ export async function showPositions(): Promise<void> {
   }
 
   let totalPnl = 0;
+  let totalUnrealizedPnl = 0;
+  
   for (const mid of mids) {
-    const pos = positions[mid];
-    const currentPrice =
-      (await getMarketYesPrice(mid)) ?? pos.entry_price ?? 0;
-    const pnl = (currentPrice - pos.entry_price) * pos.shares;
-    totalPnl += pnl;
-    const pnlStr =
-      pnl >= 0
-        ? C.GREEN(`+$${pnl.toFixed(2)}`)
-        : C.RED(`-$${Math.abs(pnl).toFixed(2)}`);
-    const tone = pnl >= 0 ? "green" : "red";
+    const pos = positions[mid] as PositionWithTracker;
+    const currentPrice = (await getMarketYesPrice(mid)) ?? pos.entry_price ?? 0;
+    const unrealizedPnl = (currentPrice - pos.entry_price) * pos.shares;
+    totalUnrealizedPnl += unrealizedPnl;
+    totalPnl += pos.pnl || 0;
+    
+    const pnlStr = unrealizedPnl >= 0
+      ? C.GREEN(`+$${unrealizedPnl.toFixed(2)}`)
+      : C.RED(`-$${Math.abs(unrealizedPnl).toFixed(2)}`);
+    const tone = unrealizedPnl >= 0 ? "green" : "red";
+    const stopPrice = calculateStopLoss(pos.entry_price);
+    
+    // Tampilin stop loss & trailing info
+    let riskInfo = stat("Stop loss", `$${stopPrice.toFixed(3)} (${STOP_LOSS_PCT * 100}%)`, "yellow");
+    if (pos.highestPrice && currentPrice >= pos.entry_price * 1.20) {
+      riskInfo = stat("Trailing active", `Peak: $${pos.highestPrice.toFixed(3)}`, "green");
+    }
+    
     console.log(
       "\n" +
         panel(
@@ -94,6 +288,7 @@ export async function showPositions(): Promise<void> {
           [
             stat("Entry", `$${pos.entry_price.toFixed(3)}`, "cyan"),
             stat("Now", `$${currentPrice.toFixed(3)}`, tone),
+            riskInfo,
             stat("Shares", pos.shares.toFixed(1), "blue"),
             stat("Cost", `$${pos.cost.toFixed(2)}`, "yellow"),
             stat("PnL", pnlStr, tone),
@@ -104,26 +299,26 @@ export async function showPositions(): Promise<void> {
     );
   }
 
-  const pnlColor = totalPnl >= 0 ? C.GREEN : C.RED;
+  const totalColor = totalUnrealizedPnl >= 0 ? C.GREEN : C.RED;
   console.log(
     "\n" +
       panel(
         "Portfolio Summary",
         [
           stat("Balance", `$${sim.balance.toFixed(2)}`, "cyan"),
-          stat(
-            "Open PnL",
-            pnlColor(`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`),
-            totalPnl >= 0 ? "green" : "red"
-          ),
+          stat("Unrealized PnL", totalColor(`${totalUnrealizedPnl >= 0 ? "+" : ""}${totalUnrealizedPnl.toFixed(2)}`), totalUnrealizedPnl >= 0 ? "green" : "red"),
+          stat("Realized PnL", `$${totalPnl.toFixed(2)}`, totalPnl >= 0 ? "green" : "red"),
           stat("Total trades", `${sim.total_trades}`, "blue"),
           stat("W/L", `${sim.wins}/${sim.losses}`, "yellow")
         ],
-        totalPnl >= 0 ? "green" : "red"
+        totalUnrealizedPnl >= 0 ? "green" : "red"
       )
   );
 }
 
+// =============================================================================
+// MAIN RUN FUNCTION (MODIF DENGAN KELLY + STOP LOSS)
+// =============================================================================
 export async function run(options: RunOptions): Promise<void> {
   const { mode, config } = options;
 
@@ -135,7 +330,7 @@ export async function run(options: RunOptions): Promise<void> {
       ? walletUsd
       : sim.balance;
 
-  const positions = sim.positions;
+  const positions = sim.positions as Record<string, PositionWithTracker>;
   let tradesExecuted = 0;
   let exitsFound = 0;
 
@@ -159,7 +354,7 @@ export async function run(options: RunOptions): Promise<void> {
   console.log(
     "\n" +
       panel(
-        "Weather Trading Bot",
+        "Weather Trading Bot (UPGRADED with Kelly + Stop Loss)",
         [
           `${badge(modeText(mode), modeTone(mode))} ${C.DIM("Automated weather-market scanner")}`,
           "",
@@ -167,9 +362,10 @@ export async function run(options: RunOptions): Promise<void> {
           ...(mode !== "execute"
             ? [stat("Return vs start", `${returnStr}  ${C.DIM(`from $${starting.toFixed(2)}`)}`, totalReturn >= 0 ? "green" : "red")]
             : []),
-          stat("Position size", `${(POSITION_PCT * 100).toFixed(0)}% of balance`, "blue"),
+          stat("Position sizing", `${KELLY_FRACTION * 100}% Kelly (max 15%)`, "blue"),
+          stat("Stop loss", `${STOP_LOSS_PCT * 100}% from entry`, "red"),
           stat("Entry threshold", `< $${config.entry_threshold.toFixed(2)}`, "green"),
-          stat("Exit threshold", `>= $${config.exit_threshold.toFixed(2)}`, "red"),
+          stat("Exit threshold", `>= $${config.exit_threshold.toFixed(2)} (or stop loss)`, "red"),
           stat("Trade record", `${sim.wins} wins / ${sim.losses} losses`, "yellow")
         ],
         modeTone(mode)
@@ -177,84 +373,67 @@ export async function run(options: RunOptions): Promise<void> {
   );
 
   const persist = mode === "paper" || mode === "execute";
+  const balanceRef = { value: balance };
 
-  // --- CHECK EXITS ---
-  console.log(`\n${divider("EXIT SCAN", "magenta")}`);
+  // --- CHECK EXITS (with Stop Loss & Trailing) ---
+  console.log(`\n${divider("EXIT SCAN (Stop Loss / Take Profit / Trailing)", "magenta")}`);
   for (const [mid, pos] of Object.entries(positions)) {
     const currentPrice = await getMarketYesPrice(mid);
     if (currentPrice == null) continue;
 
+    // Check if price hit take profit (original exit threshold)
     if (currentPrice >= config.exit_threshold) {
       exitsFound += 1;
-      const pnl = (currentPrice - pos.entry_price) * pos.shares;
+      const profit = (currentPrice - pos.entry_price) * pos.shares;
       console.log(
         panel(
-          `Exit Candidate • ${shortQuestion(pos.question, 56)}`,
+          `Take Profit • ${shortQuestion(pos.question, 56)}`,
           [
-            stat("Current price", `$${currentPrice.toFixed(3)}`, "red"),
+            stat("Current price", `$${currentPrice.toFixed(3)}`, "green"),
             stat("Exit threshold", `$${config.exit_threshold.toFixed(2)}`, "yellow"),
             stat("Shares", pos.shares.toFixed(1), "blue"),
-            stat(
-              "Estimated PnL",
-              `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`,
-              pnl >= 0 ? "green" : "red"
-            ),
-            `${C.DIM("Odds gauge")}     ${progressBar(currentPrice, 1, 26, "red")}`
+            stat("Profit", `+$${profit.toFixed(2)}`, "green"),
+            `${C.DIM("Odds gauge")}     ${progressBar(currentPrice, 1, 26, "green")}`
           ],
-          "magenta"
+          "green"
         )
       );
 
-      if (mode === "execute") {
-        if (!pos.token_id || !clob) {
-          warn("Missing CLOB token_id for this position — cannot sell on-chain");
-          continue;
-        }
-        const sellPx = Math.max(currentPrice - 0.01, 0.01);
+      if (mode === "execute" && clob && pos.token_id) {
         try {
+          const sellPx = Math.max(currentPrice - 0.01, 0.01);
           await sellYesLimit(clob, pos.token_id, sellPx, pos.shares);
           ok("CLOB sell order submitted");
         } catch (e) {
           warn(`CLOB sell failed: ${String(e)}`);
           continue;
         }
-        balance += pos.cost + pnl;
-        const est = pnl;
-        if (est > 0) sim.wins += 1;
-        else sim.losses += 1;
-        const trade: Trade = {
-          type: "exit",
-          question: pos.question,
-          entry_price: pos.entry_price,
-          exit_price: currentPrice,
-          pnl: Number(est.toFixed(2)),
-          cost: pos.cost,
-          closed_at: new Date().toISOString()
-        };
-        sim.trades.push(trade);
-        delete positions[mid];
-        ok(`Closed — est. PnL: ${est >= 0 ? "+" : ""}${est.toFixed(2)}`);
-      } else if (mode === "paper") {
-        balance += pos.cost + pnl;
-        if (pnl > 0) sim.wins += 1;
-        else sim.losses += 1;
-        const trade: Trade = {
-          type: "exit",
-          question: pos.question,
-          entry_price: pos.entry_price,
-          exit_price: currentPrice,
-          pnl: Number(pnl.toFixed(2)),
-          cost: pos.cost,
-          closed_at: new Date().toISOString()
-        };
-        sim.trades.push(trade);
-        delete positions[mid];
-        ok(
-          `Closed — PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`
-        );
-      } else {
-        skip("Dry-run — not selling");
       }
+      
+      balanceRef.value += pos.cost + profit;
+      if (profit > 0) sim.wins += 1;
+      else sim.losses += 1;
+      const trade: Trade = {
+        type: "exit",
+        question: pos.question,
+        entry_price: pos.entry_price,
+        exit_price: currentPrice,
+        pnl: Number(profit.toFixed(2)),
+        cost: pos.cost,
+        closed_at: new Date().toISOString()
+      };
+      sim.trades.push(trade);
+      delete positions[mid];
+      ok(`Closed — PnL: ${profit >= 0 ? "+" : ""}${profit.toFixed(2)}`);
+      continue;
+    }
+    
+    // Check Stop Loss & Trailing (NEW from bot lama)
+    const exited = await checkAndExecuteExit(
+      mid, pos, currentPrice, mode, clob, balanceRef, sim, positions
+    );
+    if (exited) {
+      exitsFound += 1;
     }
   }
 
@@ -262,8 +441,8 @@ export async function run(options: RunOptions): Promise<void> {
     skip("No exit opportunities");
   }
 
-  // --- SCAN ENTRIES ---
-  console.log(`\n${divider("ENTRY SCAN", "cyan")}`);
+  // --- SCAN ENTRIES (with Kelly sizing) ---
+  console.log(`\n${divider("ENTRY SCAN (with Kelly sizing)", "cyan")}`);
 
   const activeLocations = getActiveLocations(config);
   for (const citySlug of activeLocations) {
@@ -353,6 +532,7 @@ export async function run(options: RunOptions): Promise<void> {
       const marketId = matched.market.id;
       const question = matched.question;
       const tone = priceTone(price, config.entry_threshold, config.exit_threshold);
+      
       console.log(
         panel(
           `Matched Bucket • ${shortQuestion(question, 52)}`,
@@ -360,7 +540,7 @@ export async function run(options: RunOptions): Promise<void> {
             stat("Forecast temp", `${forecastTemp}°F`, "cyan"),
             stat("YES price", `$${price.toFixed(3)}`, tone),
             stat("Entry trigger", `< $${config.entry_threshold.toFixed(2)}`, "green"),
-            stat("Exit trigger", `>= $${config.exit_threshold.toFixed(2)}`, "red"),
+            stat("Exit trigger", `$${config.exit_threshold.toFixed(2)} or stop loss`, "red"),
             `${C.DIM("Market odds")}   ${progressBar(price, 1, 26, tone)}`
           ],
           tone
@@ -369,40 +549,45 @@ export async function run(options: RunOptions): Promise<void> {
 
       if (price >= config.entry_threshold) {
         skip(
-          `Price $${price.toFixed(
-            3
-          )} above threshold $${config.entry_threshold.toFixed(2)}`
+          `Price $${price.toFixed(3)} above threshold $${config.entry_threshold.toFixed(2)}`
         );
         continue;
       }
 
-      const basePositionSize = Number((balance * POSITION_PCT).toFixed(2));
-      const minOrderUsd =
-        mode === "execute" ? MIN_EXECUTE_ORDER_USD : MIN_PAPER_ORDER_USD;
-      const positionSize = Number(Math.max(basePositionSize, minOrderUsd).toFixed(2));
+      // ============================================================
+      // 🚀 UPGRADE: PAKE KELLY CRITERION BUAT SIZING (DARI BOT LAMA)
+      // ============================================================
+      // Estimate probability (simple version: price inverse)
+      // Kalo lo punya ensemble forecast, ini bisa diganti dengan probabilitas real
+      const estimatedProb = Math.min(0.95, Math.max(0.05, 1 - price));
+      
+      const positionSize = calculatePositionSizeWithKelly(
+        balanceRef.value,
+        estimatedProb,
+        price,
+        mode
+      );
 
-      if (balance < minOrderUsd) {
+      if (balanceRef.value < MIN_PAPER_ORDER_USD) {
         skip(
-          `Wallet balance $${balance.toFixed(
-            2
-          )} is below the live minimum order size of $${minOrderUsd.toFixed(2)}`
+          `Wallet balance $${balanceRef.value.toFixed(2)} is below minimum order size`
         );
         continue;
       }
 
       const shares = positionSize / price;
+      const kellyPercentDisplay = ((positionSize / balanceRef.value) * 100).toFixed(1);
+      
       console.log(
         panel(
           `Entry Signal • ${locData.name}`,
           [
             stat("Action", `${mode === "execute" ? "BUY YES" : "BUY SETUP"}`, "green"),
             stat("Price", `$${price.toFixed(3)}`, "green"),
-            stat("Position size", `$${positionSize.toFixed(2)}`, "yellow"),
-            ...(positionSize !== basePositionSize
-              ? [stat("Base 5% size", `$${basePositionSize.toFixed(2)}`, "gray")]
-              : []),
+            stat("Position size", `$${positionSize.toFixed(2)} (${kellyPercentDisplay}% of balance)`, "yellow"),
             stat("Estimated shares", shares.toFixed(1), "blue"),
-            `${C.DIM("Sizing gauge")}  ${progressBar(positionSize, Math.max(balance, 1), 26, "green")}`
+            stat("Stop loss", `$${(price * (1 - STOP_LOSS_PCT)).toFixed(3)} (${STOP_LOSS_PCT * 100}%)`, "yellow"),
+            `${C.DIM("Sizing method")} ${KELLY_FRACTION * 100}% Kelly (base ${FALLBACK_POSITION_PCT * 100}%)`
           ],
           "green"
         )
@@ -418,7 +603,7 @@ export async function run(options: RunOptions): Promise<void> {
         continue;
       }
 
-      if (positionSize < minOrderUsd) {
+      if (positionSize < MIN_PAPER_ORDER_USD) {
         skip(`Position size $${positionSize.toFixed(2)} too small`);
         continue;
       }
@@ -437,7 +622,7 @@ export async function run(options: RunOptions): Promise<void> {
           warn(`CLOB buy failed: ${String(e)}`);
           continue;
         }
-        const pos: Position = {
+        const pos: PositionWithTracker = {
           question,
           entry_price: price,
           shares,
@@ -446,7 +631,8 @@ export async function run(options: RunOptions): Promise<void> {
           location: citySlug,
           forecast_temp: forecastTemp,
           opened_at: new Date().toISOString(),
-          token_id: tokenId
+          token_id: tokenId,
+          highestPrice: price  // Inisialisasi highest price untuk trailing stop
         };
         positions[marketId] = pos;
         sim.total_trades += 1;
@@ -460,10 +646,10 @@ export async function run(options: RunOptions): Promise<void> {
         };
         sim.trades.push(trade);
         tradesExecuted += 1;
-        balance -= positionSize;
+        balanceRef.value -= positionSize;
       } else if (mode === "paper") {
-        balance -= positionSize;
-        const pos: Position = {
+        balanceRef.value -= positionSize;
+        const pos: PositionWithTracker = {
           question,
           entry_price: price,
           shares,
@@ -471,7 +657,8 @@ export async function run(options: RunOptions): Promise<void> {
           date: dateStr,
           location: citySlug,
           forecast_temp: forecastTemp,
-          opened_at: new Date().toISOString()
+          opened_at: new Date().toISOString(),
+          highestPrice: price  // Inisialisasi highest price untuk trailing stop
         };
         positions[marketId] = pos;
         sim.total_trades += 1;
@@ -486,9 +673,7 @@ export async function run(options: RunOptions): Promise<void> {
         sim.trades.push(trade);
         tradesExecuted += 1;
         ok(
-          `Position opened — $${positionSize.toFixed(
-            2
-          )} deducted from balance`
+          `Position opened — $${positionSize.toFixed(2)} deducted from balance (${kellyPercentDisplay}% of balance)`
         );
       } else {
         skip("Dry-run — not buying");
@@ -498,9 +683,9 @@ export async function run(options: RunOptions): Promise<void> {
   }
 
   if (persist) {
-    sim.balance = Number(balance.toFixed(2));
+    sim.balance = Number(balanceRef.value.toFixed(2));
     sim.positions = positions;
-    sim.peak_balance = Math.max(sim.peak_balance ?? balance, balance);
+    sim.peak_balance = Math.max(sim.peak_balance ?? balanceRef.value, balanceRef.value);
     await saveSim(sim);
   }
 
@@ -509,11 +694,12 @@ export async function run(options: RunOptions): Promise<void> {
       panel(
         "Run Summary",
         [
-          stat("Ending balance", `$${balance.toFixed(2)}`, "cyan"),
+          stat("Ending balance", `$${balanceRef.value.toFixed(2)}`, "cyan"),
           stat("Trades this run", `${tradesExecuted}`, tradesExecuted > 0 ? "green" : "gray"),
           stat("Exits found", `${exitsFound}`, exitsFound > 0 ? "magenta" : "gray"),
           stat("Open positions", `${Object.keys(positions).length}`, "blue"),
-          `${C.DIM("Bot mode")}       ${badge(modeText(mode), modeTone(mode))}`
+          `${C.DIM("Bot mode")}       ${badge(modeText(mode), modeTone(mode))}`,
+          `${C.DIM("Risk mgmt")}     Kelly ${KELLY_FRACTION * 100}% | Stop loss ${STOP_LOSS_PCT * 100}% | Trailing active`
         ],
         modeTone(mode)
       )
@@ -526,7 +712,7 @@ export async function run(options: RunOptions): Promise<void> {
           "Dry-Run Reminder",
           [
             C.YELLOW("No orders were submitted in this run."),
-            "Use `--live` for paper trading or `--execute` for real CLOB orders."
+            "Use `npm run paper` for paper trading or `npm run execute` for real CLOB orders."
           ],
           "yellow"
         )
