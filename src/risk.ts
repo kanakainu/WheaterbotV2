@@ -1,15 +1,15 @@
-// src/risk.ts - VERSI FINAL (tanpa parameter config)
-// Parameter hardcoded sesuai bot lama lo
+// src/risk.ts - VERSI UPGRADE (Step 1)
+// MAX_POSITION_PCT 0.15→0.05, MIN_EV 0.05→0.08, trail 0.85→0.92
 
-const KELLY_FRACTION = 0.25;        // Fractional Kelly (25% dari full Kelly)
-const STOP_LOSS_PCT = 0.20;          // Stop loss 20% dari entry
-const TRAILING_ACTIVATE_PCT = 0.20;   // Aktifin trailing setelah profit 20%
-const MAX_POSITION_PCT = 0.15;        // Maksimum posisi 15% dari balance
-const MIN_EV = 0.05;                  // Minimum Expected Value 5%
+const KELLY_FRACTION = 0.25;
+const STOP_LOSS_PCT = 0.15;           // 20% → 15%
+const TRAILING_ACTIVATE_PCT = 0.15;    // 20% → 15%
+const TRAILING_RETRACE_PCT = 0.92;     // 0.85 → 0.92 (trail 8% dari peak)
+const MAX_POSITION_PCT = 0.05;         // 0.15 → 0.05 (cap 5% per trade)
+const MIN_EV = 0.08;                   // 0.05 → 0.08 (EV 8%)
 
 /**
  * Hitung Expected Value (EV)
- * EV = p * (1/price - 1) - (1-p)
  */
 export function calculateExpectedValue(prob: number, price: number): number {
     if (price <= 0 || price >= 1) return 0;
@@ -26,26 +26,22 @@ export function isEVSufficient(prob: number, price: number): boolean {
 
 /**
  * Hitung ukuran posisi pake Fractional Kelly
- * Rumus: f* = (p * b - q) / b, lalu dikali KELLY_FRACTION
  */
 export function calculateKellyPosition(prob: number, price: number): number {
     if (price <= 0 || price >= 1) return 0;
     
-    const b = (1 / price) - 1;  // Odds: berapa kali lipat keuntungan kalo menang
-    const q = 1 - prob;          // Probabilitas kalah
-    
+    const b = (1 / price) - 1;
+    const q = 1 - prob;
     const kellyValue = (prob * b - q) / b;
     
-    // Kalo negatif, gak usah beli
     if (kellyValue <= 0) return 0;
     
-    // Fractional Kelly + batasin maksimum
     const finalValue = kellyValue * KELLY_FRACTION;
     return Math.min(finalValue, MAX_POSITION_PCT);
 }
 
 /**
- * Hitung harga Stop Loss (20% di bawah harga beli)
+ * Hitung harga Stop Loss (15% di bawah harga beli)
  */
 export function calculateStopLoss(entryPrice: number): number {
     return entryPrice * (1 - STOP_LOSS_PCT);
@@ -59,22 +55,27 @@ export function isStopLossHit(entryPrice: number, currentPrice: number): boolean
 }
 
 /**
- * Hitung harga Trailing Stop
- * @param entryPrice Harga beli awal
- * @param currentPrice Harga saat ini
- * @param highestPrice Harga tertinggi yang pernah tercapai
- * @returns Harga stop loss baru, atau null kalo belum waktunya
+ * Hitung harga Trailing Stop (trail 8% dari peak)
  */
 export function updateTrailingStop(entryPrice: number, currentPrice: number, highestPrice: number): number | null {
     const activateThreshold = entryPrice * (1 + TRAILING_ACTIVATE_PCT);
     
-    // Cek apakah sudah waktunya trailing stop aktif (profit >=20%)
     if (currentPrice >= activateThreshold) {
-        // Trail 15% dari harga tertinggi (85% dari peak)
-        const trailPct = 0.85;
-        const newStop = highestPrice * trailPct;
-        // Stop loss tidak boleh lebih rendah dari harga beli (break even)
+        const newStop = highestPrice * TRAILING_RETRACE_PCT;
         return Math.max(newStop, entryPrice);
     }
     return null;
+}
+
+/**
+ * Adjust position size based on losing streak (drawdown throttle)
+ */
+export function adjustForDrawdown(baseSize: number, losingStreak: number): number {
+    if (losingStreak >= 5) {
+        return baseSize * 0.5;  // Cut posisi 50% kalo loss 5x berturut
+    }
+    if (losingStreak >= 10) {
+        return 0;  // Stop trading kalo loss 10x
+    }
+    return baseSize;
 }
