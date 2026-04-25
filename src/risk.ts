@@ -1,81 +1,79 @@
-// src/risk.ts - VERSI UPGRADE (Step 1)
-// MAX_POSITION_PCT 0.15→0.05, MIN_EV 0.05→0.08, trail 0.85→0.92
+// src/risk.ts - CONFIDENCE KELLY + DRAWDOWN PROTECTION
 
-const KELLY_FRACTION = 0.25;
-const STOP_LOSS_PCT = 0.15;           // 20% → 15%
-const TRAILING_ACTIVATE_PCT = 0.15;    // 20% → 15%
-const TRAILING_RETRACE_PCT = 0.92;     // 0.85 → 0.92 (trail 8% dari peak)
-const MAX_POSITION_PCT = 0.05;         // 0.15 → 0.05 (cap 5% per trade)
-const MIN_EV = 0.08;                   // 0.05 → 0.08 (EV 8%)
+const KELLY_FRACTION = 0.20;           // 20% dari full Kelly (lebih konservatif)
+const MAX_POSITION_PCT = 0.03;          // Max 3% per trade (dari 5%)
+const STOP_LOSS_PCT = 0.15;
+const TRAILING_ACTIVATE_PCT = 0.15;
+const TRAILING_RETRACE_PCT = 0.92;
+const MIN_EV = 0.08;
 
-/**
- * Hitung Expected Value (EV)
- */
+// ========== NEW: CONFIDENCE KELLY ==========
+export function getPositionSize(
+  prob: number,           // Model probability (0-1)
+  price: number,          // Market price
+  confidence: number,     // Model confidence (0-1)
+  losingStreak: number    // Current losing streak count
+): number {
+  // Full Kelly formula
+  const b = (1 / price) - 1;
+  const q = 1 - prob;
+  let kelly = ((prob * b) - q) / b;
+  
+  if (kelly <= 0 || !isFinite(kelly)) return 0;
+  
+  // 1. CONFIDENCE HAIRCUT
+  kelly *= confidence;
+  
+  // 2. DRAWDOWN PROTECTION
+  if (losingStreak >= 2) kelly *= 0.5;    // Cut size 50% after 2 losses
+  if (losingStreak >= 4) return 0;        // No new trades after 4 losses
+  
+  // 3. FRACTIONAL KELLY
+  kelly *= KELLY_FRACTION;
+  
+  // 4. CAP MAX POSITION
+  return Math.min(kelly, MAX_POSITION_PCT);
+}
+
+// ========== LEGACY FUNCTIONS (untuk kompatibilitas) ==========
 export function calculateExpectedValue(prob: number, price: number): number {
-    if (price <= 0 || price >= 1) return 0;
-    const potentialProfit = (1 / price) - 1;
-    return (prob * potentialProfit) - ((1 - prob) * 1);
+  if (price <= 0 || price >= 1) return 0;
+  const potentialProfit = (1 / price) - 1;
+  return (prob * potentialProfit) - ((1 - prob) * 1);
 }
 
-/**
- * Cek apakah EV memenuhi minimum threshold
- */
 export function isEVSufficient(prob: number, price: number): boolean {
-    return calculateExpectedValue(prob, price) >= MIN_EV;
+  return calculateExpectedValue(prob, price) >= MIN_EV;
 }
 
-/**
- * Hitung ukuran posisi pake Fractional Kelly
- */
 export function calculateKellyPosition(prob: number, price: number): number {
-    if (price <= 0 || price >= 1) return 0;
-    
-    const b = (1 / price) - 1;
-    const q = 1 - prob;
-    const kellyValue = (prob * b - q) / b;
-    
-    if (kellyValue <= 0) return 0;
-    
-    const finalValue = kellyValue * KELLY_FRACTION;
-    return Math.min(finalValue, MAX_POSITION_PCT);
+  const b = (1 / price) - 1;
+  const q = 1 - prob;
+  const kelly = ((prob * b) - q) / b;
+  if (kelly <= 0) return 0;
+  return Math.min(kelly * KELLY_FRACTION, MAX_POSITION_PCT);
 }
 
-/**
- * Hitung harga Stop Loss (15% di bawah harga beli)
- */
 export function calculateStopLoss(entryPrice: number): number {
-    return entryPrice * (1 - STOP_LOSS_PCT);
+  return entryPrice * (1 - STOP_LOSS_PCT);
 }
 
-/**
- * Cek apakah kena Stop Loss
- */
 export function isStopLossHit(entryPrice: number, currentPrice: number): boolean {
-    return currentPrice <= calculateStopLoss(entryPrice);
+  return currentPrice <= calculateStopLoss(entryPrice);
 }
 
-/**
- * Hitung harga Trailing Stop (trail 8% dari peak)
- */
 export function updateTrailingStop(entryPrice: number, currentPrice: number, highestPrice: number): number | null {
-    const activateThreshold = entryPrice * (1 + TRAILING_ACTIVATE_PCT);
-    
-    if (currentPrice >= activateThreshold) {
-        const newStop = highestPrice * TRAILING_RETRACE_PCT;
-        return Math.max(newStop, entryPrice);
-    }
-    return null;
+  const activateThreshold = entryPrice * (1 + TRAILING_ACTIVATE_PCT);
+  if (currentPrice >= activateThreshold) {
+    const newStop = highestPrice * TRAILING_RETRACE_PCT;
+    return Math.max(newStop, entryPrice);
+  }
+  return null;
 }
 
-/**
- * Adjust position size based on losing streak (drawdown throttle)
- */
-export function adjustForDrawdown(baseSize: number, losingStreak: number): number {
-    if (losingStreak >= 5) {
-        return baseSize * 0.5;  // Cut posisi 50% kalo loss 5x berturut
-    }
-    if (losingStreak >= 10) {
-        return 0;  // Stop trading kalo loss 10x
-    }
-    return baseSize;
+// Simpler adjust function for compatibility
+export function adjustForDrawdown(size: number, losingStreak: number): number {
+  if (losingStreak >= 4) return 0;
+  if (losingStreak >= 2) return size * 0.5;
+  return size;
 }
