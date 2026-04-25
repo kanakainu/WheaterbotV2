@@ -1,4 +1,4 @@
-// src/depth.ts - FIXED VERSION (Spread parser bug fixed)
+// src/depth.ts - WEEK 2 (Spread Filter + Spread Score)
 import axios from 'axios';
 
 const CLOB_API = 'https://clob.polymarket.com';
@@ -13,7 +13,6 @@ function parsePrice(val: any): number {
   if (val === undefined || val === null) return 0;
   const num = parseFloat(val);
   if (isNaN(num)) return 0;
-  // Kalo lebih dari 1, asumsikan perlu dibagi 100
   return num > 1 ? num / 100 : num;
 }
 
@@ -39,7 +38,31 @@ export async function getOrderBook(tokenId: string): Promise<OrderBook | null> {
   }
 }
 
-export async function getBestBidAsk(tokenId: string): Promise<{ bid: number; ask: number; bidSize: number; askSize: number; spread: number } | null> {
+// ========== WEEK 2: SPREAD FUNCTIONS ==========
+export function getSpreadPercent(ask: number, bid: number): number {
+  if (bid <= 0) return Infinity;
+  return (ask - bid) / bid;
+}
+
+export function isSpreadAcceptable(spreadPercent: number, maxSpread: number = 0.02): boolean {
+  return spreadPercent <= maxSpread;
+}
+
+export function getSpreadScore(spreadPercent: number): number {
+  if (spreadPercent >= 0.08) return 0;
+  if (spreadPercent <= 0.02) return 100;
+  return 100 - ((spreadPercent - 0.02) / 0.06) * 100;
+}
+
+export async function getBestBidAsk(tokenId: string): Promise<{ 
+  bid: number; 
+  ask: number; 
+  bidSize: number; 
+  askSize: number; 
+  spread: number;
+  spreadPercent: number;
+  spreadScore: number;
+} | null> {
   const book = await getOrderBook(tokenId);
   if (!book || !book.bids.length || !book.asks.length) return null;
   
@@ -48,14 +71,13 @@ export async function getBestBidAsk(tokenId: string): Promise<{ bid: number; ask
   
   if (bid === 0 || ask === 0) return null;
   
-  const spread = (ask - bid) / ((ask + bid) / 2);
+  const spread = ask - bid;
+  const spreadPercent = getSpreadPercent(ask, bid);
+  const spreadScore = getSpreadScore(spreadPercent);
   
-  // Debug log buat liat raw data
-  console.log(`[Depth] Bid: ${bid}, Ask: ${ask}, Spread: ${(spread * 100).toFixed(1)}%`);
-  
-  // Spread filter: kalo spread > 8%, kasih warning tapi jangan return null (biar testing)
-  if (spread > 0.08) {
-    console.log(`[Depth] ⚠️ Wide spread: ${(spread * 100).toFixed(1)}%`);
+  const spreadPercentFormatted = (spreadPercent * 100).toFixed(1);
+  if (spreadPercent > 0.04) {
+    console.log(`[DEPTH] ⚠️ Wide spread: ${spreadPercentFormatted}% (bid: ${bid}, ask: ${ask})`);
   }
   
   return {
@@ -63,7 +85,9 @@ export async function getBestBidAsk(tokenId: string): Promise<{ bid: number; ask
     ask,
     bidSize: book.bids[0]?.size || 0,
     askSize: book.asks[0]?.size || 0,
-    spread
+    spread,
+    spreadPercent,
+    spreadScore
   };
 }
 
