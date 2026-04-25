@@ -69,8 +69,9 @@ function shortQuestion(question: string, max = 62): string {
 }
 
 function getUnitDisplay(citySlug: string): string {
-  const cityData = LOCATIONS[citySlug as keyof typeof LOCATIONS];
-  return cityData?.unit || 'F';
+  // Ambil unit dari forecast.ts (GLOBAL_CITIES)
+  const cityInfo = getCityData(citySlug);
+  return cityInfo?.unit || 'F';
 }
 
 function calculatePositionSizeWithKelly(
@@ -136,7 +137,11 @@ async function checkAndExecuteExit(
     }
     
     balanceRef.value += pos.cost + loss;
-    (loss > 0 ? sim.wins : sim.losses) += 1;
+    if (loss > 0) {
+    sim.wins += 1;
+} else {
+    sim.losses += 1;
+}
     sim.trades.push({ type: "exit", question: pos.question, entry_price: entryPrice, exit_price: currentPrice, pnl: Number(loss.toFixed(2)), cost: pos.cost, closed_at: new Date().toISOString() });
     delete positions[marketId];
     ok(`Stop loss closed — PnL: ${loss >= 0 ? "+" : ""}${loss.toFixed(2)}`);
@@ -279,7 +284,11 @@ export async function run(options: RunOptions): Promise<void> {
         catch (e) { warn(`CLOB sell failed: ${String(e)}`); continue; }
       }
       balanceRef.value += pos.cost + profit;
-      (profit > 0 ? sim.wins : sim.losses)++;
+      if (profit > 0) {
+    sim.wins++;
+} else {
+    sim.losses++;
+}
       sim.trades.push({ type: "exit", question: pos.question, entry_price: pos.entry_price, exit_price: currentPrice, pnl: Number(profit.toFixed(2)), cost: pos.cost, closed_at: new Date().toISOString() });
       delete positions[mid];
       ok(`Take profit closed — PnL: +$${profit.toFixed(2)}`);
