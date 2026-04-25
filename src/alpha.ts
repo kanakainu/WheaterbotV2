@@ -1,5 +1,4 @@
-// src/alpha.ts - ALPHA ENGINE (Edge Filter, Ranking, Correlation)
-
+// src/alpha.ts - WEEK 2 (Liquidity Scoring + Spread Filter)
 export interface AlphaCandidate {
   marketId: string;
   tokenId?: string;
@@ -7,7 +6,12 @@ export interface AlphaCandidate {
   modelProb: number;
   edge: number;
   spread: number;
+  spreadPercent: number;
+  spreadScore: number;
   volume24h: number;
+  depthUSDC: number;
+  liquidityScore: number;
+  liquidityTier: string;
   question: string;
   citySlug: string;
   region: string;
@@ -35,7 +39,7 @@ export function getEdgeMultiplier(edge: number): number {
   return 0.5;
 }
 
-// ========== 3. CONFIDENCE SCORE (dari model) ==========
+// ========== 3. CONFIDENCE SCORE ==========
 export function getConfidence(modelProb: number): number {
   if (modelProb >= 0.85) return 1.2;
   if (modelProb >= 0.75) return 1.0;
@@ -45,42 +49,64 @@ export function getConfidence(modelProb: number): number {
   return 0.5;
 }
 
-// ========== 4. LIQUIDITY SCORE ==========
-export function calculateLiquidityScore(
-  depth: number,
-  spread: number,
-  volume24h: number
-): number {
-  // Depth score (0-100)
-  let depthScore = Math.min(depth / 5000, 1) * 100;
-  
-  // Volume score (0-100)
-  let volumeScore = Math.min(volume24h / 50000, 1) * 100;
-  
-  // Spread penalty (0-100)
-  let spreadPenalty = Math.max(0, 100 - (spread / 0.02) * 100);
-  
-  // Weighted score
-  const score = (depthScore * 0.4) + (volumeScore * 0.4) + (spreadPenalty * 0.2);
-  
-  return Math.min(100, Math.max(0, score));
+// ========== 4. LIQUIDITY SCORING (WEEK 2) ==========
+export interface LiquidityMetrics {
+  depthScore: number;
+  volumeScore: number;
+  spreadScore: number;
+  totalScore: number;
+  isLiquid: boolean;
 }
 
-// ========== 5. RANK CANDIDATES ==========
+export function calculateLiquidityScore(
+  depthUSDC: number,
+  volume24h: number,
+  spreadPercent: number
+): LiquidityMetrics {
+  const depthScore = Math.min(depthUSDC / 10000, 1) * 100;
+  const volumeScore = Math.min(volume24h / 50000, 1) * 100;
+  
+  let spreadScore = 100;
+  if (spreadPercent > 0.02) {
+    spreadScore = Math.max(0, 100 - ((spreadPercent - 0.02) / 0.06) * 100);
+  }
+  
+  const totalScore = (depthScore * 0.3) + (volumeScore * 0.3) + (spreadScore * 0.4);
+  const isLiquid = depthScore >= 30 && volumeScore >= 20 && spreadScore >= 60;
+  
+  return {
+    depthScore: Math.round(depthScore),
+    volumeScore: Math.round(volumeScore),
+    spreadScore: Math.round(spreadScore),
+    totalScore: Math.round(totalScore),
+    isLiquid
+  };
+}
+
+export function getLiquidityTier(totalScore: number): 'Excellent' | 'Good' | 'Fair' | 'Poor' {
+  if (totalScore >= 80) return 'Excellent';
+  if (totalScore >= 60) return 'Good';
+  if (totalScore >= 40) return 'Fair';
+  return 'Poor';
+}
+
+// ========== 5. RANK CANDIDATES (with liquidity weighting) ==========
 export function rankCandidates(candidates: AlphaCandidate[]): AlphaCandidate[] {
   return candidates
-    .filter(c => c.edge >= 0.07)                    // Minimal edge 7%
-    .filter(c => c.confidence >= 0.7)               // Minimal confidence 70%
+    .filter(c => c.edge >= 0.07)
+    .filter(c => c.confidence >= 0.7)
+    .filter(c => c.liquidityScore >= 40)
     .sort((a, b) => {
-      // Weighted score: edge (60%) + confidence (30%) + liquidity (10%)
-      const scoreA = (a.edge * 0.6) + (a.confidence * 0.3) + (Math.min(a.volume24h / 50000, 1) * 0.1);
-      const scoreB = (b.edge * 0.6) + (b.confidence * 0.3) + (Math.min(b.volume24h / 50000, 1) * 0.1);
+      const edgeNormA = Math.min(a.edge / 0.20, 1);
+      const edgeNormB = Math.min(b.edge / 0.20, 1);
+      const scoreA = (edgeNormA * 0.5) + (a.confidence * 0.25) + ((a.liquidityScore / 100) * 0.25);
+      const scoreB = (edgeNormB * 0.5) + (b.confidence * 0.25) + ((b.liquidityScore / 100) * 0.25);
       return scoreB - scoreA;
     })
-    .slice(0, 2);                                   // Max 2 trades per run
+    .slice(0, 2);
 }
 
-// ========== 6. REGION MAPPING (untuk correlation filter) ==========
+// ========== 6. REGION MAPPING ==========
 const REGION_MAP: Record<string, string> = {
   nyc: 'northeast',
   chicago: 'midwest',
