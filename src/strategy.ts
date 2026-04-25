@@ -491,13 +491,13 @@ export async function run(options: RunOptions): Promise<void> {
       }
       
       const tokenIdCheck = getYesTokenId(matched.market);
-      if (tokenIdCheck && mode !== "dry-run") {
-        const volume = await getMarketVolume(tokenIdCheck);
-        if (volume.volume24h < MIN_VOLUME_USD) {
-          skip(`Low volume: $${volume.volume24h.toFixed(0)} < $${MIN_VOLUME_USD}`);
-          continue;
-        }
-      }
+      // if (tokenIdCheck && mode !== "dry-run") {
+//   const volume = await getMarketVolume(tokenIdCheck);
+//   if (volume.volume24h < MIN_VOLUME_USD) {
+//     skip(`Low volume...`);
+//     continue;
+//   }
+// }
       
       if (tokenIdCheck && mode !== "dry-run") {
         const ba = await getBestBidAsk(tokenIdCheck);
