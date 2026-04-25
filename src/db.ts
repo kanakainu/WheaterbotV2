@@ -54,11 +54,11 @@ db.exec(`
 `);
 
 // Inisialisasi balance kalo belum ada
-const balanceRow = db.prepare('SELECT value FROM state WHERE key = "balance"').get();
+const balanceRow = db.prepare(`SELECT value FROM state WHERE key = 'balance'`).get();
 if (!balanceRow) {
-  db.prepare('INSERT INTO state (key, value) VALUES (?, ?)').run('balance', 200.0);
-  db.prepare('INSERT INTO state (key, value) VALUES (?, ?)').run('starting_balance', 200.0);
-  db.prepare('INSERT INTO state (key, value) VALUES (?, ?)').run('peak_balance', 200.0);
+  db.prepare(`INSERT INTO state (key, value) VALUES ('balance', 200.0)`).run();
+  db.prepare(`INSERT INTO state (key, value) VALUES ('starting_balance', 200.0)`).run();
+  db.prepare(`INSERT INTO state (key, value) VALUES ('peak_balance', 200.0)`).run();
 }
 
 // ============= POSITION FUNCTIONS =============
@@ -78,11 +78,11 @@ export function savePosition(pos: any) {
 }
 
 export function loadOpenPositions(): any[] {
-  return db.prepare('SELECT * FROM positions WHERE status = "open"').all();
+  return db.prepare(`SELECT * FROM positions WHERE status = 'open'`).all();
 }
 
 export function loadAllPositions(): any[] {
-  return db.prepare('SELECT * FROM positions ORDER BY opened_at DESC').all();
+  return db.prepare(`SELECT * FROM positions ORDER BY opened_at DESC`).all();
 }
 
 export function updatePositionExit(marketId: string, exitPrice: number, pnl: number, exitMode?: string) {
@@ -102,7 +102,7 @@ export function updatePositionTrailing(marketId: string, highestPrice: number, t
 }
 
 export function deletePosition(marketId: string) {
-  return db.prepare('DELETE FROM positions WHERE market_id = ?').run(marketId);
+  return db.prepare(`DELETE FROM positions WHERE market_id = ?`).run(marketId);
 }
 
 // ============= TRADE FUNCTIONS =============
@@ -120,56 +120,56 @@ export function saveTrade(trade: any) {
 
 export function getTrades(mode?: string): any[] {
   if (mode) {
-    return db.prepare('SELECT * FROM trades WHERE mode = ? ORDER BY id DESC').all(mode);
+    return db.prepare(`SELECT * FROM trades WHERE mode = ? ORDER BY id DESC`).all(mode);
   }
-  return db.prepare('SELECT * FROM trades ORDER BY id DESC').all();
+  return db.prepare(`SELECT * FROM trades ORDER BY id DESC`).all();
 }
 
 // ============= BALANCE FUNCTIONS =============
 export function getBalance(): number {
-  const row = db.prepare('SELECT value FROM state WHERE key = "balance"').get() as { value: number } | undefined;
+  const row = db.prepare(`SELECT value FROM state WHERE key = 'balance'`).get() as { value: number } | undefined;
   return row?.value || 200.0;
 }
 
 export function setBalance(balance: number) {
-  return db.prepare('UPDATE state SET value = ? WHERE key = "balance"').run(balance);
+  return db.prepare(`UPDATE state SET value = ? WHERE key = 'balance'`).run(balance);
 }
 
 export function getStartingBalance(): number {
-  const row = db.prepare('SELECT value FROM state WHERE key = "starting_balance"').get() as { value: number } | undefined;
+  const row = db.prepare(`SELECT value FROM state WHERE key = 'starting_balance'`).get() as { value: number } | undefined;
   return row?.value || 200.0;
 }
 
 export function getPeakBalance(): number {
-  const row = db.prepare('SELECT value FROM state WHERE key = "peak_balance"').get() as { value: number } | undefined;
+  const row = db.prepare(`SELECT value FROM state WHERE key = 'peak_balance'`).get() as { value: number } | undefined;
   return row?.value || 200.0;
 }
 
 export function updatePeakBalance(balance: number) {
   const current = getPeakBalance();
   if (balance > current) {
-    db.prepare('UPDATE state SET value = ? WHERE key = "peak_balance"').run(balance);
+    db.prepare(`UPDATE state SET value = ? WHERE key = 'peak_balance'`).run(balance);
   }
 }
 
 export function getWinLoss(): { wins: number; losses: number } {
-  const wins = db.prepare('SELECT COUNT(*) as count FROM trades WHERE action = "exit" AND pnl > 0').get() as { count: number };
-  const losses = db.prepare('SELECT COUNT(*) as count FROM trades WHERE action = "exit" AND pnl < 0').get() as { count: number };
+  const wins = db.prepare(`SELECT COUNT(*) as count FROM trades WHERE action = 'exit' AND pnl > 0`).get() as { count: number };
+  const losses = db.prepare(`SELECT COUNT(*) as count FROM trades WHERE action = 'exit' AND pnl < 0`).get() as { count: number };
   return { wins: wins?.count || 0, losses: losses?.count || 0 };
 }
 
 export function getTotalTrades(): number {
-  const row = db.prepare('SELECT COUNT(*) as count FROM trades WHERE action = "entry"').get() as { count: number };
+  const row = db.prepare(`SELECT COUNT(*) as count FROM trades WHERE action = 'entry'`).get() as { count: number };
   return row?.count || 0;
 }
 
 // ============= RESET =============
 export function resetAll() {
-  db.prepare('DELETE FROM positions').run();
-  db.prepare('DELETE FROM trades').run();
-  db.prepare('UPDATE state SET value = 200.0 WHERE key = "balance"').run();
-  db.prepare('UPDATE state SET value = 200.0 WHERE key = "starting_balance"').run();
-  db.prepare('UPDATE state SET value = 200.0 WHERE key = "peak_balance"').run();
+  db.prepare(`DELETE FROM positions`).run();
+  db.prepare(`DELETE FROM trades`).run();
+  db.prepare(`UPDATE state SET value = 200.0 WHERE key = 'balance'`).run();
+  db.prepare(`UPDATE state SET value = 200.0 WHERE key = 'starting_balance'`).run();
+  db.prepare(`UPDATE state SET value = 200.0 WHERE key = 'peak_balance'`).run();
   return true;
 }
 
