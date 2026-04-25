@@ -638,7 +638,7 @@ export async function run(options: RunOptions): Promise<void> {
   console.log(`  Passed Liquidity: ${passedLiquidity}`);
   console.log(`  Final Candidates: ${finalCandidatesCount}`);
   
-  const rankedCandidates = rankCandidates(candidates);
+  const rankedCandidates = candidates;
   console.log(`\n${divider(`TOP ${rankedCandidates.length} CANDIDATES`, "green")}`);
   
   for (const cand of rankedCandidates) {
@@ -650,12 +650,14 @@ export async function run(options: RunOptions): Promise<void> {
       balanceRef.value, cand.modelProb, cand.price, cand.confidence, mode, losingStreak
     );
     positionSize = positionSize * edgeMultiplier;
-    positionSize = Math.min(positionSize, balanceRef.value * 0.05);
+    positionSize = Math.min(positionSize, balanceRef.value * 0.03);
     
-    if (positionSize <= 0) {
-      skip(`Position size too small for ${cand.citySlug}`);
-      continue;
-    }
+    console.log(`[SIZE DEBUG] ${cand.citySlug}: prob=${cand.modelProb.toFixed(3)} price=${cand.price.toFixed(3)} conf=${cand.confidence.toFixed(2)} edge=${(cand.edge*100).toFixed(1)}% size=${positionSize.toFixed(2)}`);
+
+if (positionSize <= 0) {
+  skip(`Position size too small for ${cand.citySlug}`);
+  continue;
+}
     
     const shares = positionSize / cand.price;
     const edgeTier = getEdgeTier(cand.edge);
