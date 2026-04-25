@@ -1,6 +1,6 @@
 import { buyYesLimit, getClobClient, sellYesLimit } from "./clob";
 import { BotConfig, getActiveLocations } from "./config";
-import { badge, C, divider, info, ok, panel, progressBar, skip, stat, warn } from "./colors";
+import { badge, C, divider, ok, panel, progressBar, skip, stat, warn } from "./colors";
 import { DailyForecast, getForecast, getCityData } from "./forecast";
 import { LOCATIONS } from "./nws";
 import { hoursUntilResolution, parseTempRange } from "./parsing";
@@ -26,7 +26,7 @@ const MIN_EXECUTE_ORDER_USD = 1.0;
 const KELLY_FRACTION = 0.25;
 const STOP_LOSS_PCT = 0.20;
 const TRAILING_ACTIVATE_PCT = 0.20;
-const TRAILING_RETRACE_PCT = 0.85; // 15% retracement from peak
+const TRAILING_RETRACE_PCT = 0.85;
 
 interface PositionWithTracker extends Position {
   highestPrice?: number;
@@ -69,7 +69,6 @@ function shortQuestion(question: string, max = 62): string {
 }
 
 function getUnitDisplay(citySlug: string): string {
-  // Ambil unit dari forecast.ts (GLOBAL_CITIES)
   const cityInfo = getCityData(citySlug);
   return cityInfo?.unit || 'F';
 }
@@ -94,7 +93,7 @@ function calculatePositionSizeWithKelly(
 }
 
 // =============================================================================
-// EXIT LOGIC WITH FIXED TRAILING STOP
+// EXIT LOGIC
 // =============================================================================
 async function checkAndExecuteExit(
   marketId: string,
@@ -108,12 +107,10 @@ async function checkAndExecuteExit(
 ): Promise<boolean> {
   const entryPrice = pos.entry_price;
   
-  // FIX #1: Inisialisasi highestPrice
   if (pos.highestPrice === undefined || pos.highestPrice === null) {
     pos.highestPrice = entryPrice;
   }
   
-  // Update highest price
   if (currentPrice > pos.highestPrice) {
     pos.highestPrice = currentPrice;
     console.log(`[TRAILING] ${pos.question.slice(0,40)}... peak: $${pos.highestPrice.toFixed(4)}`);
@@ -138,28 +135,26 @@ async function checkAndExecuteExit(
     
     balanceRef.value += pos.cost + loss;
     if (loss > 0) {
-    sim.wins += 1;
-} else {
-    sim.losses += 1;
-}
+      sim.wins += 1;
+    } else {
+      sim.losses += 1;
+    }
     sim.trades.push({ type: "exit", question: pos.question, entry_price: entryPrice, exit_price: currentPrice, pnl: Number(loss.toFixed(2)), cost: pos.cost, closed_at: new Date().toISOString() });
     delete positions[marketId];
     ok(`Stop loss closed — PnL: ${loss >= 0 ? "+" : ""}${loss.toFixed(2)}`);
     return true;
   }
   
-  // FIX #2 & #3: TRAILING STOP LOGIC YANG BENAR
+  // TRAILING STOP LOGIC
   const activateThreshold = entryPrice * (1 + TRAILING_ACTIVATE_PCT);
   const isTrailingActive = pos.trailingActive === true;
   
-  // Aktifkan trailing stop kalo udah profit >=20% dan belum aktif
   if (!isTrailingActive && currentPrice >= activateThreshold) {
     pos.trailingActive = true;
     pos.trailingStopPrice = currentPrice * TRAILING_RETRACE_PCT;
     console.log(`[TRAILING ACTIVATED] ${pos.question.slice(0,40)}... stop: $${pos.trailingStopPrice.toFixed(4)}`);
   }
   
-  // Update trailing stop price kalo harga naik lebih tinggi
   if (pos.trailingActive && pos.highestPrice) {
     const newStop = pos.highestPrice * TRAILING_RETRACE_PCT;
     if (newStop > (pos.trailingStopPrice || 0)) {
@@ -168,7 +163,6 @@ async function checkAndExecuteExit(
     }
   }
   
-  // Cek kena trailing stop
   if (pos.trailingActive && pos.trailingStopPrice && currentPrice <= pos.trailingStopPrice) {
     const profit = (currentPrice - entryPrice) * pos.shares;
     console.log(panel(`🎯 TRAILING STOP • ${shortQuestion(pos.question, 56)}`, [
@@ -285,10 +279,10 @@ export async function run(options: RunOptions): Promise<void> {
       }
       balanceRef.value += pos.cost + profit;
       if (profit > 0) {
-    sim.wins++;
-} else {
-    sim.losses++;
-}
+        sim.wins++;
+      } else {
+        sim.losses++;
+      }
       sim.trades.push({ type: "exit", question: pos.question, entry_price: pos.entry_price, exit_price: currentPrice, pnl: Number(profit.toFixed(2)), cost: pos.cost, closed_at: new Date().toISOString() });
       delete positions[mid];
       ok(`Take profit closed — PnL: +$${profit.toFixed(2)}`);
@@ -328,52 +322,72 @@ export async function run(options: RunOptions): Promise<void> {
       for (const market of event.markets ?? []) {
         const rng = parseTempRange(market.question || "");
         if (rng && rng[0] <= forecastTemp && forecastTemp <= rng[1]) {
-          const prices = JSON.parse(market.outcomePrices ?? "[0.5,0.5]") as number[];
-          matched = { market, question: market.question, price: prices[0], range: rng };
+          let rawPrices = market.outcomePrices ?? "[0.5,0.5]";
+          let prices;
+          try {
+            prices = JSON.parse(rawPrices) as number[];
+          } catch {
+            prices = [0.5, 0.5];
+          }
+          const yesPrice = Number(prices[0]);
+          if (isNaN(yesPrice)) continue;
+          matched = {
+            market,
+            question: market.question,
+            price: yesPrice,
+            range: rng
+          };
           break;
         }
       }
       if (!matched) { skip(`No bucket for ${forecastTemp}°${unit}`); continue; }
       
-      if (matched.price >= config.entry_threshold) { skip(`Price $${matched.price} >= $${config.entry_threshold}`); continue; }
+      // PASTIKAN PRICE ADALAH NUMBER
+      const price = Number(matched.price);
+      if (isNaN(price)) {
+        skip(`Invalid price for ${matched.question}`);
+        continue;
+      }
       
-      const estimatedProb = Math.min(0.95, Math.max(0.05, 1 - matched.price));
-      const positionSize = calculatePositionSizeWithKelly(balanceRef.value, estimatedProb, matched.price, mode);
+      if (price >= config.entry_threshold) { skip(`Price $${price} >= $${config.entry_threshold}`); continue; }
+      
+      const estimatedProb = Math.min(0.95, Math.max(0.05, 1 - price));
+      const positionSize = calculatePositionSizeWithKelly(balanceRef.value, estimatedProb, price, mode);
       if (positionSize < MIN_PAPER_ORDER_USD) { skip(`Position size $${positionSize} too small`); continue; }
       if (tradesExecuted >= config.max_trades_per_run) { skip(`Max trades reached`); continue; }
       if (positions[matched.market.id]) { skip("Already in market"); continue; }
       
       console.log(panel(`Entry Signal • ${locData.name}`, [
-        stat("Price", `$${matched.price.toFixed(3)}`, "green"),
+        stat("Price", `$${price.toFixed(3)}`, "green"),
         stat("Size", `$${positionSize.toFixed(2)} (${((positionSize/balanceRef.value)*100).toFixed(1)}% of balance)`, "yellow"),
-        stat("Stop loss", `$${(matched.price * (1-STOP_LOSS_PCT)).toFixed(3)} (${STOP_LOSS_PCT*100}%)`, "red"),
+        stat("Stop loss", `$${(price * (1-STOP_LOSS_PCT)).toFixed(3)} (${STOP_LOSS_PCT*100}%)`, "red"),
       ], "green"));
       
-      const shares = positionSize / matched.price;
+      const shares = positionSize / price;
       if (mode === "execute" && clob) {
         const tokenId = getYesTokenId(matched.market);
         if (!tokenId) { warn("No token ID"); continue; }
-        await buyYesLimit(clob, tokenId, Math.min(matched.price + 0.03, 0.99), shares);
+        await buyYesLimit(clob, tokenId, Math.min(price + 0.03, 0.99), shares);
       }
       if (mode !== "dry-run") balanceRef.value -= positionSize;
       
       positions[matched.market.id] = {
         question: matched.question,
-        entry_price: matched.price,
+        entry_price: price,
         shares,
         cost: positionSize,
         date: dateStr,
         location: citySlug,
         forecast_temp: forecastTemp,
         opened_at: new Date().toISOString(),
-        highestPrice: matched.price,
+        highestPrice: price,
         trailingActive: false,
         trailingStopPrice: undefined
       };
       sim.total_trades++;
-      sim.trades.push({ type: "entry", question: matched.question, entry_price: matched.price, shares, cost: positionSize, opened_at: new Date().toISOString() });
+      sim.trades.push({ type: "entry", question: matched.question, entry_price: price, shares, cost: positionSize, opened_at: new Date().toISOString() });
       tradesExecuted++;
-      ok(`Position opened — $${positionSize.toFixed(2)} (${((positionSize/balanceRef.value+positionSize)*100).toFixed(1)}% of balance)`);
+      ok(`Position opened — $${positionSize.toFixed(2)} (${((positionSize/(balanceRef.value+positionSize))*100).toFixed(1)}% of balance)`);
     }
   }
   
