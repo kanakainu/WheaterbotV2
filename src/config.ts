@@ -16,6 +16,8 @@ export interface BotConfig {
   polymarket_proxy_wallet_address: string;
   use_proxy_wallet: boolean;
   signature_type: SignatureType;
+  visual_crossing_key: string;
+  use_ensemble: boolean;
 
   // ========== 🚀 KONFIGURASI UPGRADE (DARI BOT LAMA) ==========
   /** Kelly fraction (0-1). Default 0.25 = 25% dari full Kelly */
@@ -43,6 +45,8 @@ export const DEFAULT_CONFIG: BotConfig = {
   polymarket_proxy_wallet_address: "",
   use_proxy_wallet: false,
   signature_type: 0,
+  visual_crossing_key: "",
+  use_ensemble: true,
 
   // Config Upgrade
   kelly_fraction: 0.25,
@@ -89,6 +93,8 @@ export async function loadConfig(): Promise<BotConfig> {
     max_position_pct: parseNumber(process.env.MAX_POSITION_PCT, DEFAULT_CONFIG.max_position_pct),
     min_ev: parseNumber(process.env.MIN_EV, DEFAULT_CONFIG.min_ev),
     use_kelly: parseBool(process.env.USE_KELLY, DEFAULT_CONFIG.use_kelly),
+    visual_crossing_key: process.env.VISUAL_CROSSING_KEY ?? "",
+    use_ensemble: parseBool(process.env.USE_ENSEMBLE, DEFAULT_CONFIG.use_ensemble),
   };
 }
 
