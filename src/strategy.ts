@@ -1,7 +1,8 @@
 import { buyYesLimit, getClobClient, sellYesLimit } from "./clob";
 import { BotConfig, getActiveLocations } from "./config";
 import { badge, C, divider, info, ok, panel, progressBar, skip, stat, warn } from "./colors";
-import { DailyForecast, LOCATIONS, getForecast } from "./nws";
+import { DailyForecast, getForecast, getCityData } from "./forecast";
+import { LOCATIONS } from "./nws"; // LOCATIONS masih dipake buat mapping nama kota
 import { hoursUntilResolution, parseTempRange } from "./parsing";
 import {
   PolymarketEvent,
