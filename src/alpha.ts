@@ -1,4 +1,5 @@
-// src/alpha.ts - WEEK 2 (Liquidity Scoring + Spread Filter)
+// src/alpha.ts - FIXED VERSION (rankCandidates tidak refilter edge/confidence)
+
 export interface AlphaCandidate {
   marketId: string;
   tokenId?: string;
@@ -39,17 +40,18 @@ export function getEdgeMultiplier(edge: number): number {
   return 0.5;
 }
 
-// ========== 3. CONFIDENCE SCORE ==========
+// ========== 3. CONFIDENCE SCORE (CAP AT 1.0) ==========
 export function getConfidence(modelProb: number): number {
-  if (modelProb >= 0.85) return 1.2;
-  if (modelProb >= 0.75) return 1.0;
-  if (modelProb >= 0.68) return 0.9;
-  if (modelProb >= 0.62) return 0.8;
-  if (modelProb >= 0.55) return 0.7;
-  return 0.5;
+  // Cap at 1.0 to avoid overweight
+  if (modelProb >= 0.85) return 1.0;
+  if (modelProb >= 0.75) return 0.95;
+  if (modelProb >= 0.68) return 0.85;
+  if (modelProb >= 0.62) return 0.75;
+  if (modelProb >= 0.55) return 0.65;
+  return 0.50;
 }
 
-// ========== 4. LIQUIDITY SCORING (WEEK 2) ==========
+// ========== 4. LIQUIDITY SCORING ==========
 export interface LiquidityMetrics {
   depthScore: number;
   volumeScore: number;
@@ -68,11 +70,13 @@ export function calculateLiquidityScore(
   
   let spreadScore = 100;
   if (spreadPercent > 0.02) {
-    spreadScore = Math.max(0, 100 - ((spreadPercent - 0.02) / 0.06) * 100);
+    spreadScore = Math.max(0, 100 - ((spreadPercent - 0.02) / 0.08) * 100);
   }
   
   const totalScore = (depthScore * 0.3) + (volumeScore * 0.3) + (spreadScore * 0.4);
-  const isLiquid = depthScore >= 30 && volumeScore >= 20 && spreadScore >= 60;
+  
+  // Loosened for paper hunting mode
+  const isLiquid = depthScore >= 15 && spreadScore >= 35;
   
   return {
     depthScore: Math.round(depthScore),
@@ -90,20 +94,30 @@ export function getLiquidityTier(totalScore: number): 'Excellent' | 'Good' | 'Fa
   return 'Poor';
 }
 
-// ========== 5. RANK CANDIDATES (with liquidity weighting) ==========
+// ========== 5. RANK CANDIDATES (FIXED - NO DOUBLE FILTER) ==========
 export function rankCandidates(candidates: AlphaCandidate[]): AlphaCandidate[] {
+  if (!candidates.length) return [];
+  
   return candidates
-    .filter(c => c.edge >= 0.07)
-    .filter(c => c.confidence >= 0.7)
-    .filter(c => c.liquidityScore >= 40)
+    // ONLY filter by liquidity score (edge & confidence already filtered upstream)
+    .filter(c => c.liquidityScore >= 30)
     .sort((a, b) => {
-      const edgeNormA = Math.min(a.edge / 0.20, 1);
-      const edgeNormB = Math.min(b.edge / 0.20, 1);
-      const scoreA = (edgeNormA * 0.5) + (a.confidence * 0.25) + ((a.liquidityScore / 100) * 0.25);
-      const scoreB = (edgeNormB * 0.5) + (b.confidence * 0.25) + ((b.liquidityScore / 100) * 0.25);
+      const edgeWeight = 0.50;
+      const confWeight = 0.30;
+      const liqWeight = 0.20;
+      
+      const edgeNormA = Math.min(a.edge / 0.15, 1);
+      const edgeNormB = Math.min(b.edge / 0.15, 1);
+      
+      const confA = Math.min(a.confidence, 1);
+      const confB = Math.min(b.confidence, 1);
+      
+      const scoreA = (edgeNormA * edgeWeight) + (confA * confWeight) + ((a.liquidityScore / 100) * liqWeight);
+      const scoreB = (edgeNormB * edgeWeight) + (confB * confWeight) + ((b.liquidityScore / 100) * liqWeight);
+      
       return scoreB - scoreA;
     })
-    .slice(0, 2);
+    .slice(0, 3);
 }
 
 // ========== 6. REGION MAPPING ==========
@@ -128,23 +142,4 @@ export function getRegion(citySlug: string): string {
 
 export function isCorrelated(region1: string, region2: string): boolean {
   return region1 === region2 && region1 !== 'unknown';
-}
-
-// ========== WEEK 3: DISAGREEMENT ALPHA (Chaos Pays) ==========
-export function getDisagreementEdgeBoost(
-  disagreementScore: number, 
-  unit: 'F' | 'C', 
-  baseEdge: number
-): number {
-  const threshold = unit === 'F' ? 4.0 : 2.2;
-  if (disagreementScore >= threshold) {
-    // High disagreement = market often mispriced
-    return baseEdge * 1.3;
-  }
-  return baseEdge;
-}
-
-export function getConsensusPenalty(consensus: boolean): number {
-  // Consensus is good, but sometimes overpriced
-  return consensus ? 1.0 : 1.05;  // 5% boost for non-consensus
 }
