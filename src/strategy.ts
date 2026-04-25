@@ -16,6 +16,8 @@ import { MONTHS } from "./time";
 import * as db from "./db";
 import type { ClobClient } from "@polymarket/clob-client";
 import { calculateKellyPosition, calculateStopLoss, isStopLossHit } from "./risk";
+import { isLiquidEnough, getBestBidAsk } from "./depth";
+import { notifyTrade, notifyError } from "./notify";
 
 // =============================================================================
 // PARAMETER & INTERFACE
@@ -127,11 +129,24 @@ async function checkAndExecuteExit(
       stat("Loss", `-$${Math.abs(loss).toFixed(2)}`, "red"),
     ], "red"));
     
+    // Telegram notification
+    await notifyTrade('stop_loss', {
+      question: pos.question,
+      price: currentPrice,
+      size: pos.cost,
+      pnl: loss,
+      balance: balanceRef.value
+    });
+    
     if (mode === "execute" && clob && pos.token_id) {
       try {
         await sellYesLimit(clob, pos.token_id, Math.max(currentPrice - 0.01, 0.01), pos.shares);
         ok("CLOB sell order submitted (stop loss)");
-      } catch (e) { warn(`CLOB sell failed: ${String(e)}`); return false; }
+      } catch (e) { 
+        warn(`CLOB sell failed: ${String(e)}`);
+        await notifyError(`Stop loss sell failed: ${String(e)}`);
+        return false;
+      }
     }
     
     balanceRef.value += pos.cost + loss;
@@ -173,11 +188,24 @@ async function checkAndExecuteExit(
       stat("Profit", `+$${profit.toFixed(2)}`, "green"),
     ], "green"));
     
+    // Telegram notification
+    await notifyTrade('take_profit', {
+      question: pos.question,
+      price: currentPrice,
+      size: pos.cost,
+      pnl: profit,
+      balance: balanceRef.value
+    });
+    
     if (mode === "execute" && clob && pos.token_id) {
       try {
         await sellYesLimit(clob, pos.token_id, Math.max(currentPrice - 0.01, 0.01), pos.shares);
         ok("CLOB sell order submitted (trailing stop)");
-      } catch (e) { warn(`CLOB sell failed: ${String(e)}`); return false; }
+      } catch (e) { 
+        warn(`CLOB sell failed: ${String(e)}`);
+        await notifyError(`Trailing stop sell failed: ${String(e)}`);
+        return false;
+      }
     }
     
     balanceRef.value += pos.cost + profit;
@@ -248,7 +276,12 @@ export async function run(options: RunOptions): Promise<void> {
   let clob: ClobClient | undefined;
   if (mode === "execute") {
     try { clob = await getClobClient(config); } 
-    catch (e) { warn(`Failed to init CLOB: ${String(e)}`); return; }
+    catch (e) { 
+      const errMsg = String(e);
+      warn(`Failed to init CLOB: ${errMsg}`);
+      await notifyError(`CLOB init failed: ${errMsg}`);
+      return;
+    }
   }
 
   console.log("\n" + panel("Weather Trading Bot (UPGRADED)", [
@@ -258,6 +291,15 @@ export async function run(options: RunOptions): Promise<void> {
     stat("Stop loss", `${STOP_LOSS_PCT*100}%`, "red"),
     stat("Entry threshold", `< $${config.entry_threshold}`, "green"),
   ], modeTone(mode)));
+
+  // Send start notification for live/paper
+  if (mode !== "dry-run") {
+    await notifyTrade('buy', {
+      question: "Bot Started",
+      price: balance,
+      balance: balance
+    });
+  }
 
   const balanceRef = { value: balance };
   const persist = mode === "paper" || mode === "execute";
@@ -274,9 +316,23 @@ export async function run(options: RunOptions): Promise<void> {
         stat("Exit", `$${currentPrice.toFixed(3)} >= $${config.exit_threshold}`, "green"),
         stat("Profit", `+$${profit.toFixed(2)}`, "green"),
       ], "green"));
+      
+      // Telegram notification
+      await notifyTrade('take_profit', {
+        question: pos.question,
+        price: currentPrice,
+        size: pos.cost,
+        pnl: profit,
+        balance: balanceRef.value
+      });
+      
       if (mode === "execute" && clob && pos.token_id) {
         try { await sellYesLimit(clob, pos.token_id, Math.max(currentPrice - 0.01, 0.01), pos.shares); }
-        catch (e) { warn(`CLOB sell failed: ${String(e)}`); continue; }
+        catch (e) { 
+          warn(`CLOB sell failed: ${String(e)}`);
+          await notifyError(`Take profit sell failed: ${String(e)}`);
+          continue;
+        }
       }
       balanceRef.value += pos.cost + profit;
       if (profit > 0) {
@@ -365,10 +421,45 @@ export async function run(options: RunOptions): Promise<void> {
       ], "green"));
       
       const shares = positionSize / price;
+      
+      // === UPGRADE: ORDER BOOK DEPTH CHECK ===
+      const tokenIdForDepth = getYesTokenId(matched.market);
+      if (tokenIdForDepth && mode !== "dry-run") {
+        const requiredShares = positionSize / price;
+        const isLiquid = await isLiquidEnough(tokenIdForDepth, requiredShares, 10);
+        if (!isLiquid) {
+          skip(`Market not liquid enough for ${requiredShares.toFixed(1)} shares`);
+          continue;
+        }
+        
+        const bestPriceData = await getBestBidAsk(tokenIdForDepth);
+        if (bestPriceData && bestPriceData.ask > price * 1.02) {
+          skip(`Best ask ${bestPriceData.ask.toFixed(4)} > 2% above market price ${price.toFixed(4)}`);
+          continue;
+        }
+      }
+      
+      // === UPGRADE: TELEGRAM NOTIFICATION ===
+      if (mode !== "dry-run") {
+        await notifyTrade('buy', {
+          question: matched.question,
+          price: price,
+          size: positionSize,
+          balance: balanceRef.value
+        });
+      }
+      
       if (mode === "execute" && clob) {
         const tokenId = getYesTokenId(matched.market);
         if (!tokenId) { warn("No token ID"); continue; }
-        await buyYesLimit(clob, tokenId, Math.min(price + 0.03, 0.99), shares);
+        try {
+          await buyYesLimit(clob, tokenId, Math.min(price + 0.03, 0.99), shares);
+          ok(`CLOB buy order submitted @ limit $${Math.min(price + 0.03, 0.99).toFixed(3)}`);
+        } catch (e) {
+          warn(`CLOB buy failed: ${String(e)}`);
+          await notifyError(`Buy order failed: ${String(e)}`);
+          continue;
+        }
       }
       if (mode !== "dry-run") balanceRef.value -= positionSize;
       
