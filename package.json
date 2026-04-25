@@ -4,14 +4,14 @@
   "description": "TypeScript fork of the Weather Trading Bot for Polymarket.",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
-    "start": "npm run signal",
-    "signal": "npm run build && node dist/index.js",
-    "paper": "npm run build && node dist/index.js --live",
-    "execute": "npm run build && node dist/index.js --execute",
-    "trade": "npm run build && node dist/index.js --execute --interval 30",
-    "positions": "npm run build && node dist/index.js --positions",
-    "reset": "npm run build && node dist/index.js --reset"
+  "build": "tsc",
+  "signal": "npm run build && node dist/index.js",
+  "paper": "npm run build && node dist/index.js --live",
+  "execute": "npm run build && node dist/index.js --execute",
+  "trade": "npm run build && node dist/index.js --execute --interval 30",
+  "positions": "npm run build && node dist/index.js --positions",
+  "reset": "npm run build && node dist/index.js --reset",
+  "db-reset": "npm run build && node dist/index.js --db-reset"
   },
   "keywords": [
     "weather",
