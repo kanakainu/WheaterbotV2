@@ -2,7 +2,7 @@ import { buyYesLimit, getClobClient, sellYesLimit } from "./clob";
 import { BotConfig, getActiveLocations } from "./config";
 import { badge, C, divider, ok, panel, progressBar, skip, stat, warn } from "./colors";
 import { DailyForecast, getForecast } from "./forecast";
-import { getEnsembleTemperatures, calculateProbabilityFromEnsemble } from "./forecast-ensemble";
+import { getMultiModelEnsemble, calculateProbabilityFromEnsemble, isConfidentEnough, getDisagreementMultiplier, shouldBoostOnDisagreement } from "./forecast-ensemble";
 import { LOCATIONS } from "./nws";
 import { hoursUntilResolution, parseTempRange } from "./parsing";
 import {
@@ -19,10 +19,10 @@ import { calculateStopLoss, isStopLossHit, adjustForDrawdown, getPositionSize } 
 import { isLiquidEnough, getBestBidAsk, getMarketVolume } from "./depth";
 import { notifyTrade, notifyError } from "./notify";
 import { CITIES } from "./cities";
-import { calculateEdge, getEdgeTier, getEdgeMultiplier, getConfidence, rankCandidates, AlphaCandidate, getRegion, isCorrelated, calculateLiquidityScore, getLiquidityTier } from "./alpha";
+import { calculateEdge, getEdgeTier, getEdgeMultiplier, getConfidence, rankCandidates, AlphaCandidate, getRegion, isCorrelated, calculateLiquidityScore, getLiquidityTier, getDisagreementEdgeBoost, getConsensusPenalty } from "./alpha";
 
 // =============================================================================
-// PARAMETER & INTERFACE (WEEK 2)
+// PARAMETER & INTERFACE (WEEK 1-4)
 // =============================================================================
 
 const FALLBACK_POSITION_PCT = 0.02;
@@ -37,7 +37,7 @@ const MIN_EDGE = 0.07;
 const MIN_CONFIDENCE = 0.70;
 const MIN_VOLUME_USD = 5000;
 const MIN_HOURS_LIQUID = 2;
-const MAX_SPREAD_PERCENT = 0.02;  // Week 2: Max 2% spread
+const MAX_SPREAD_PERCENT = 0.02;
 
 const MIN_PAPER_ORDER_USD = 0.5;
 const MIN_EXECUTE_ORDER_USD = 1.0;
@@ -55,6 +55,10 @@ export interface RunOptions {
   config: BotConfig;
   walletUsd?: number;
 }
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
 
 function modeTone(mode: TradeMode): "green" | "yellow" | "cyan" {
   if (mode === "execute") return "green";
@@ -142,6 +146,9 @@ function calculatePositionSizeWithConfidenceKelly(
   return Number(positionSize.toFixed(2));
 }
 
+// =============================================================================
+// EXIT LOGIC
+// =============================================================================
 async function checkAndExecuteExit(
   marketId: string,
   pos: PositionWithTracker,
@@ -249,6 +256,9 @@ async function checkAndExecuteExit(
   return false;
 }
 
+// =============================================================================
+// SHOW POSITIONS
+// =============================================================================
 export async function showPositions(): Promise<void> {
   const sim = await loadSim();
   const positions = sim.positions;
@@ -291,6 +301,9 @@ export async function showPositions(): Promise<void> {
   ], totalUnrealized >=0 ? "green" : "red"));
 }
 
+// =============================================================================
+// MAIN RUN FUNCTION (WEEK 1-4 INTEGRATED)
+// =============================================================================
 export async function run(options: RunOptions): Promise<void> {
   const { mode, config } = options;
   const sim = await loadSim();
@@ -318,7 +331,7 @@ export async function run(options: RunOptions): Promise<void> {
     return;
   }
 
-  console.log("\n" + panel("Weather Trading Bot (WEEK 2 - Microstructure Alpha)", [
+  console.log("\n" + panel("Weather Trading Bot (WEEK 1-4 - Alpha Engine)", [
     `${badge(modeText(mode), modeTone(mode))}`,
     stat("Balance", `$${balance.toFixed(2)}`, "cyan"),
     stat("Max position", `3% of balance`, "blue"),
@@ -334,6 +347,7 @@ export async function run(options: RunOptions): Promise<void> {
   const balanceRef = { value: balance };
   const persist = mode === "paper" || mode === "execute";
 
+  // EXIT SCAN
   console.log(`\n${divider("EXIT SCAN", "magenta")}`);
   for (const [mid, pos] of Object.entries(positions)) {
     const currentPrice = await getMarketYesPrice(mid);
@@ -371,6 +385,7 @@ export async function run(options: RunOptions): Promise<void> {
   }
   if (!exitsFound) skip("No exit opportunities");
 
+  // ENTRY SCAN (WEEK 1-4 INTEGRATED)
   console.log(`\n${divider("ENTRY SCAN (Alpha Engine)", "cyan")}`);
   const activeLocations = getActiveLocations(config);
   const candidates: AlphaCandidate[] = [];
@@ -404,13 +419,21 @@ export async function run(options: RunOptions): Promise<void> {
           let forecastTemp: number | null = null;
           let modelProb: number = 0.5;
           let usedEnsemble = false;
+          let disagreementScore = 0;
+          let consensus = true;
           
+          // WEEK 3: Multi-model ensemble
           if (cityData && config.use_ensemble) {
-            const samples = await getEnsembleTemperatures(cityData, dateStr);
-            if (samples && samples.length) {
-              forecastTemp = samples.reduce((a,b) => a+b, 0) / samples.length;
-              forecastTemp = Math.round(forecastTemp * 10) / 10;
+            const multiModel = await getMultiModelEnsemble(cityData, dateStr);
+            if (multiModel.forecasts.length > 0) {
+              forecastTemp = multiModel.weightedForecast;
               usedEnsemble = true;
+              disagreementScore = multiModel.disagreementScore;
+              consensus = multiModel.consensus;
+              
+              if (!consensus && disagreementScore > (cityData.unit === 'F' ? 4 : 2.2)) {
+                console.log(`[ALPHA] High disagreement! ${disagreementScore.toFixed(1)}°${cityData.unit} - chaos opportunity`);
+              }
             }
           }
           
@@ -442,9 +465,16 @@ export async function run(options: RunOptions): Promise<void> {
               if (isNaN(yesPrice)) continue;
               
               if (usedEnsemble && cityData) {
-                const samples = await getEnsembleTemperatures(cityData, dateStr);
-                if (samples) {
-                  modelProb = calculateProbabilityFromEnsemble(samples, rng[0], rng[1]);
+                const samples = await getMultiModelEnsemble(cityData, dateStr);
+                if (samples.forecasts.length > 0) {
+                  // Generate samples from models
+                  const allSamples: number[] = [];
+                  for (const f of samples.forecasts) {
+                    for (let s = 0; s < 10; s++) {
+                      allSamples.push(f.forecast + (Math.random() - 0.5) * 2);
+                    }
+                  }
+                  modelProb = calculateProbabilityFromEnsemble(allSamples, rng[0], rng[1]);
                 } else {
                   modelProb = 0.68;
                 }
@@ -466,7 +496,14 @@ export async function run(options: RunOptions): Promise<void> {
           const price = Number(matched.price);
           if (isNaN(price)) { continue; }
           
-          const edge = calculateEdge(modelProb, price);
+          let edge = calculateEdge(modelProb, price);
+          
+          // WEEK 3: Disagreement boost
+          if (!consensus && disagreementScore > (cityData?.unit === 'F' ? 4 : 2.2)) {
+            edge = edge * 1.3;
+            console.log(`[ALPHA] Disagreement boost: ${(edge*100).toFixed(1)}% edge`);
+          }
+          
           const confidence = getConfidence(modelProb);
           const edgeTier = getEdgeTier(edge);
           
@@ -485,13 +522,11 @@ export async function run(options: RunOptions): Promise<void> {
             
             bestPriceData = await getBestBidAsk(tokenIdCheck);
             
-            // WEEK 2: SPREAD FILTER
             if (bestPriceData && bestPriceData.spreadPercent > MAX_SPREAD_PERCENT) {
               continue;
             }
           }
           
-          // WEEK 2: LIQUIDITY SCORING
           const depthUSDC = (bestPriceData?.askSize || 0) * (bestPriceData?.ask || price);
           const liquidityMetrics = calculateLiquidityScore(depthUSDC, volume.volume24h, bestPriceData?.spreadPercent || 0.03);
           
