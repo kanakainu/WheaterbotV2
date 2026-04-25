@@ -2,12 +2,13 @@
 import dotenv from "dotenv";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import { BotConfig, loadConfig } from "./config";
+import { BotConfig, loadConfig, getActiveLocations } from "./config";
 import { badge, panel, stat } from "./colors";
 import { resetSim } from "./simState";
 import { run, showPositions, type TradeMode } from "./strategy";
 import { getWalletBalanceUsdViaClob } from "./walletBalance";
 import * as db from "./db";
+import { runArbitrageScanner } from "./arbitrage";
 
 dotenv.config();
 
@@ -16,11 +17,6 @@ function validateKeys(cfg: BotConfig): void {
   let pk = (cfg.polymarket_private_key || "").trim();
   const addr = (cfg.polymarket_proxy_wallet_address || "").trim();
 
-  // Untuk dry-run dan paper mode, private key tidak wajib
-  // Tapi untuk execute mode, wajib
-  // Kita akan validasi nanti di mode execute
-
-  // Untuk paper/dry-run, lewati validasi ketat
   const mode = process.argv.includes("--execute") ? "execute" : 
                process.argv.includes("--live") ? "paper" : "dry-run";
   
@@ -68,20 +64,17 @@ async function main(): Promise<void> {
     .option("execute", {
       type: "boolean",
       default: false,
-      describe:
-        "Place real limit orders on Polymarket CLOB (requires USDC + allowance)"
+      describe: "Place real limit orders on Polymarket CLOB (requires USDC + allowance)"
     })
     .option("live", {
       type: "boolean",
       default: false,
-      describe:
-        "Paper trading: update simulation with virtual PnL (no on-chain orders)"
+      describe: "Paper trading: update simulation with virtual PnL (no on-chain orders)"
     })
     .option("interval", {
       type: "number",
       default: 0,
-      describe:
-        "With --execute or --live: run every N minutes (e.g. 30). Ctrl+C to stop."
+      describe: "With --execute or --live: run every N minutes (e.g. 30). Ctrl+C to stop."
     })
     .option("positions", {
       type: "boolean",
@@ -98,6 +91,11 @@ async function main(): Promise<void> {
       default: false,
       describe: "Reset SQLite database (clear all positions and trades)"
     })
+    .option("arb", {
+      type: "boolean",
+      default: false,
+      describe: "Run arbitrage scanner (YES + NO < 1)"
+    })
     .option("balance", {
       type: "number",
       default: 200,
@@ -108,7 +106,6 @@ async function main(): Promise<void> {
 
   const cfg = await loadConfig();
   
-  // Handle --db-reset (reset SQLite database)
   if (argv["db-reset"]) {
     console.log("\n" + panel("Database Reset", [
       "Resetting SQLite database...",
@@ -122,7 +119,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Handle --reset (legacy reset, now also resets DB)
   if (argv.reset) {
     console.log("\n" + panel("Reset Simulation", [
       "Resetting paper simulation to virtual balance..."
@@ -132,13 +128,17 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Handle --positions (show open positions)
   if (argv.positions) {
     await showPositions();
     return;
   }
 
-  // Determine mode
+  if (argv.arb) {
+    const locations = getActiveLocations(cfg);
+    await runArbitrageScanner(locations);
+    return;
+  }
+
   const execute = Boolean(argv.execute);
   const paper = Boolean(argv.live);
 
@@ -151,7 +151,6 @@ async function main(): Promise<void> {
 
   const mode: TradeMode = execute ? "execute" : paper ? "paper" : "dry-run";
 
-  // Validate keys only for execute mode
   if (mode === "execute") {
     validateKeys(cfg);
   }
@@ -172,8 +171,6 @@ async function main(): Promise<void> {
             "red"
           )
       );
-      // Jangan exit biar bisa test paper tetap jalan, tapi kasih warning
-      console.log("\n⚠️  Warning: Live mode may fail due to insufficient balance.\n");
     } else {
       console.info(
         "\n" +
@@ -188,7 +185,6 @@ async function main(): Promise<void> {
       );
     }
   } else {
-    // Untuk paper & dry-run, tampilkan balance dari DB
     const balance = db.getBalance();
     console.info(
       "\n" +
@@ -224,7 +220,6 @@ async function main(): Promise<void> {
         ) +
         "\n"
     );
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       if (mode === "execute") {
         walletUsd = await getWalletBalanceUsdViaClob(cfg);
