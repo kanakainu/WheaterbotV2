@@ -53,16 +53,10 @@ export async function getOrderBook(
 //
 // MID PRICE SPREAD (lebih stabil buat prediction market)
 //
-export function getSpreadPercent(
-  ask:number,
-  bid:number
-): number {
-
-  if (ask<=0 || bid<=0) return Infinity;
-
-  const mid=(ask+bid)/2;
-
-  return (ask-bid)/mid;
+export function getSpreadPercent(ask: number, bid: number): number {
+  if (ask <= 0 || bid <= 0) return Infinity;
+  const mid = (ask + bid) / 2;
+  return (ask - bid) / mid;
 }
 
 export function isSpreadAcceptable(
