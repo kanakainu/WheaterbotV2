@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc",
     "signal": "npm run build && node dist/index.js",
-    "paper": "npm run build && node dist/index.js --live",
+    "paper": "npm run build && node dist/index.js --paper"
     "execute": "npm run build && node dist/index.js --execute",
     "trade": "npm run build && node dist/index.js --execute --interval 30",
     "positions": "npm run build && node dist/index.js --positions",
