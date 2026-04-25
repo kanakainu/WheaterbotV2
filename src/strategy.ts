@@ -129,7 +129,6 @@ async function checkAndExecuteExit(
       stat("Loss", `-$${Math.abs(loss).toFixed(2)}`, "red"),
     ], "red"));
     
-    // Telegram notification
     await notifyTrade('stop_loss', {
       question: pos.question,
       price: currentPrice,
@@ -188,7 +187,6 @@ async function checkAndExecuteExit(
       stat("Profit", `+$${profit.toFixed(2)}`, "green"),
     ], "green"));
     
-    // Telegram notification
     await notifyTrade('take_profit', {
       question: pos.question,
       price: currentPrice,
@@ -292,7 +290,6 @@ export async function run(options: RunOptions): Promise<void> {
     stat("Entry threshold", `< $${config.entry_threshold}`, "green"),
   ], modeTone(mode)));
 
-  // Send start notification for live/paper
   if (mode !== "dry-run") {
     await notifyTrade('buy', {
       question: "Bot Started",
@@ -317,7 +314,6 @@ export async function run(options: RunOptions): Promise<void> {
         stat("Profit", `+$${profit.toFixed(2)}`, "green"),
       ], "green"));
       
-      // Telegram notification
       await notifyTrade('take_profit', {
         question: pos.question,
         price: currentPrice,
@@ -399,7 +395,6 @@ export async function run(options: RunOptions): Promise<void> {
       }
       if (!matched) { skip(`No bucket for ${forecastTemp}°${unit}`); continue; }
       
-      // PASTIKAN PRICE ADALAH NUMBER
       const price = Number(matched.price);
       if (isNaN(price)) {
         skip(`Invalid price for ${matched.question}`);
@@ -422,24 +417,25 @@ export async function run(options: RunOptions): Promise<void> {
       
       const shares = positionSize / price;
       
-      // === UPGRADE: ORDER BOOK DEPTH CHECK ===
+      // ========== UPGRADE: ORDER BOOK DEPTH CHECK (DIPERLONGGA) ==========
       const tokenIdForDepth = getYesTokenId(matched.market);
       if (tokenIdForDepth && mode !== "dry-run") {
         const requiredShares = positionSize / price;
-        const isLiquid = await isLiquidEnough(tokenIdForDepth, requiredShares, 10);
+        // Tolerance slippage dinaikkan jadi 50% (dari 10%)
+        const isLiquid = await isLiquidEnough(tokenIdForDepth, requiredShares, 50);
         if (!isLiquid) {
           skip(`Market not liquid enough for ${requiredShares.toFixed(1)} shares`);
           continue;
         }
         
         const bestPriceData = await getBestBidAsk(tokenIdForDepth);
-        if (bestPriceData && bestPriceData.ask > price * 1.02) {
-          skip(`Best ask ${bestPriceData.ask.toFixed(4)} > 2% above market price ${price.toFixed(4)}`);
+        // Tolerance harga dinaikkan jadi 50% di atas market price (dari 2%)
+        if (bestPriceData && bestPriceData.ask > price * 1.50) {
+          skip(`Best ask ${bestPriceData.ask.toFixed(4)} > 50% above market price ${price.toFixed(4)}`);
           continue;
         }
       }
       
-      // === UPGRADE: TELEGRAM NOTIFICATION ===
       if (mode !== "dry-run") {
         await notifyTrade('buy', {
           question: matched.question,
