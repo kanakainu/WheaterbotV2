@@ -17,8 +17,10 @@ function validateKeys(cfg: BotConfig): void {
   let pk = (cfg.polymarket_private_key || "").trim();
   const addr = (cfg.polymarket_proxy_wallet_address || "").trim();
 
+  // FIX: Add --paper flag support
   const mode = process.argv.includes("--execute") ? "execute" : 
-               process.argv.includes("--live") ? "paper" : "dry-run";
+               process.argv.includes("--live") ? "paper" : 
+               process.argv.includes("--paper") ? "paper" : "dry-run";
   
   if (mode === "execute") {
     if (!pk) {
@@ -70,6 +72,11 @@ async function main(): Promise<void> {
       type: "boolean",
       default: false,
       describe: "Paper trading: update simulation with virtual PnL (no on-chain orders)"
+    })
+    .option("paper", {
+      type: "boolean",
+      default: false,
+      describe: "Paper trading mode (alias for --live)"
     })
     .option("interval", {
       type: "number",
@@ -139,12 +146,13 @@ async function main(): Promise<void> {
     return;
   }
 
+  // FIX: Support --paper flag
   const execute = Boolean(argv.execute);
-  const paper = Boolean(argv.live);
+  const paper = Boolean(argv.live) || Boolean(argv.paper);
 
   if (execute && paper) {
     console.error(
-      "Choose one: --execute (real CLOB trades) or --live (paper simulation), not both."
+      "Choose one: --execute (real CLOB trades) or --live/--paper (paper simulation), not both."
     );
     process.exit(1);
   }
