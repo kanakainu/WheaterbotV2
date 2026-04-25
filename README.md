@@ -1,7 +1,3 @@
-# ✅ OK BRO! GUE KASIH README VERSI UPGRADE LENGKAP
-
-Ini adalah README yang sudah diperbarui dengan **semua upgrade** yang lo lakukan: SQLite, Kelly Criterion, Stop Loss, Global Cities, Ensemble Forecast.
-
 ---
 # 🌤️ WeatherBot V2 - Polymarket Weather Trading Bot
 
