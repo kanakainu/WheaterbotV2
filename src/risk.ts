@@ -1,89 +1,44 @@
-// src/risk.ts
-// 📦 KOMBINASI DARI BOT LAMA (Python V2) - Kelly + Stop Loss + EV
-import { BotConfig } from "./config";
+// src/risk.ts - VERSI FINAL (siap pakai)
 
-/**
- * Hitung Expected Value (EV)
- * Rumus: EV = (Probabilitas Menang * Potensi Keuntungan) - (Probabilitas Kalah * Potensi Kerugian)
- * Potensi Keuntungan dihitung sebagai (1/price - 1)
- */
+const KELLY_FRACTION = 0.25;
+const STOP_LOSS_PCT = 0.20;
+const TRAILING_ACTIVATE_PCT = 0.20;
+const MAX_POSITION_PCT = 0.15;
+const MIN_EV = 0.05;
+
 export function calculateExpectedValue(prob: number, price: number): number {
     if (price <= 0 || price >= 1) return 0;
     const potentialProfit = (1 / price) - 1;
-    const potentialLoss = 1;
-    return (prob * potentialProfit) - ((1 - prob) * potentialLoss);
+    return (prob * potentialProfit) - ((1 - prob) * 1);
 }
 
-/**
- * Cek apakah EV memenuhi minimum threshold dari config
- */
-export function isEVSufficient(prob: number, price: number, config: BotConfig): boolean {
-    const ev = calculateExpectedValue(prob, price);
-    return ev >= config.min_ev;
+export function isEVSufficient(prob: number, price: number): boolean {
+    return calculateExpectedValue(prob, price) >= MIN_EV;
 }
 
-/**
- * Hitung ukuran posisi pake Kelly Criterion (dari Bot Python V2 lo)
- * Rumus Kelly: f* = (p * b - q) / b
- * Di sini kita pake Fractional Kelly (p * kelly_fraction) biar lebih aman.
- */
-export function calculateKellyPosition(
-    prob: number,          // Probabilitas menang (0-1)
-    price: number,        // Harga YES saat ini
-    config: BotConfig      // Konfigurasi dari bot
-): number {
+export function calculateKellyPosition(prob: number, price: number): number {
     if (price <= 0 || price >= 1) return 0;
-    if (!config.use_kelly) return config.max_position_pct; // Fallback kalo Kelly dimatiin
-
-    const b = (1 / price) - 1;  // Odds: berapa kali lipat keuntungan kalo menang
-    const q = 1 - prob;          // Probabilitas kalah
-
-    // Full Kelly Value (bisa hasilnya negatif, artinya gak boleh beli)
+    const b = (1 / price) - 1;
+    const q = 1 - prob;
     const kellyValue = (prob * b - q) / b;
-
-    // Fractional Kelly + Batasi maksimum sesuai konfigurasi (default 15%)
-    // Kalo hasilnya negatif, langsung return 0
     if (kellyValue <= 0) return 0;
-    const finalValue = kellyValue * config.kelly_fraction;
-    return Math.min(finalValue, config.max_position_pct);
+    const finalValue = kellyValue * KELLY_FRACTION;
+    return Math.min(finalValue, MAX_POSITION_PCT);
 }
 
-/**
- * Hitung harga Stop Loss (default 20% di bawah harga beli)
- */
-export function calculateStopLoss(entryPrice: number, config: BotConfig): number {
-    return entryPrice * (1 - config.stop_loss_pct);
+export function calculateStopLoss(entryPrice: number): number {
+    return entryPrice * (1 - STOP_LOSS_PCT);
 }
 
-/**
- * Cek apakah harga saat ini sudah kena Stop Loss?
- */
-export function isStopLossHit(entryPrice: number, currentPrice: number, config: BotConfig): boolean {
-    const stopPrice = calculateStopLoss(entryPrice, config);
-    return currentPrice <= stopPrice;
+export function isStopLossHit(entryPrice: number, currentPrice: number): boolean {
+    return currentPrice <= calculateStopLoss(entryPrice);
 }
 
-/**
- * Logika Trailing Stop (dari bot Python V2)
- * Kalo harga sudah naik di atas activation threshold (misal 20%), stop loss akan naik mengikuti harga tertinggi.
- */
-export function updateTrailingStop(
-    entryPrice: number,
-    currentPrice: number,
-    highestPrice: number,
-    config: BotConfig
-): number | null {
-    // Activation price: misal entry $0.20 * 1.20 = $0.24
-    const activateThreshold = entryPrice * (1 + config.trailing_activate_pct);
-
-    // Cek apakah trailing stop sudah aktif
+export function updateTrailingStop(entryPrice: number, currentPrice: number, highestPrice: number): number | null {
+    const activateThreshold = entryPrice * (1 + TRAILING_ACTIVATE_PCT);
     if (currentPrice >= activateThreshold) {
-        // Trailing stop akan berada di 15% di bawah harga tertinggi (highestPrice)
-        // Contoh: kalo highestPrice $0.30, stop loss-nya di $0.255
-        const trailPct = 0.85;
-        const newStop = highestPrice * trailPct;
-        // Stop loss tidak boleh lebih rendah dari harga beli (break even)
+        const newStop = highestPrice * 0.85;
         return Math.max(newStop, entryPrice);
     }
-    return null; // Trail belum aktif
+    return null;
 }
