@@ -82,7 +82,7 @@ function calculatePositionSizeWithKelly(
   mode: TradeMode
 ): number {
   // Pake Kelly dari bot lama lo
-  const kellyPercent = calculateKellyPosition(probability, price, KELLY_FRACTION);
+  const kellyPercent = calculateKellyPosition(probability, price);
   
   // Kalo Kelly gagal atau hasilnya 0, pake fallback 5%
   let positionPct = kellyPercent;
