@@ -34,9 +34,9 @@ const TRAILING_ACTIVATE_PCT = 0.15;
 const TRAILING_RETRACE_PCT = 0.92;
 const MAX_SLIPPAGE_PCT = 0.03;
 const DEPTH_SLIPPAGE_TOL = 5;
-const MIN_EDGE = 0.03;  // 3% (dari 8% - diturunkan untuk test)
+const MIN_EDGE = 0.01;  // 3% (dari 8% - diturunkan untuk test)
 const MIN_HOURS_LIQUID = 2;
-const MIN_VOLUME_USD = 5000;  // Turunkan dari 10000
+const MIN_VOLUME_USD = 0;  // Turunkan dari 10000
 
 const MIN_PAPER_ORDER_USD = 0.5;
 const MIN_EXECUTE_ORDER_USD = 1.0;
