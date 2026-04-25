@@ -1,5 +1,3 @@
-// File: src/strategy.ts (LENGKAP - SUDAH DI-FIX UNTUK PAPER MODE BYPASS LIQUIDITY FILTER)
-
 import { buyYesLimit, getClobClient, sellYesLimit } from "./clob";
 import { BotConfig, getActiveLocations } from "./config";
 import { badge, C, divider, ok, panel, progressBar, skip, stat, warn } from "./colors";
@@ -24,23 +22,22 @@ import { CITIES } from "./cities";
 import { calculateEdge, getEdgeTier, getEdgeMultiplier, getConfidence, rankCandidates, AlphaCandidate, getRegion, isCorrelated, calculateLiquidityScore, getLiquidityTier } from "./alpha";
 
 // =============================================================================
-// ALPHA HUNTING MODE - SWEET SPOT CONFIG (Paper Bypass Liquidity & Volume)
+// ALPHA HUNTING MODE - FIXED VERSION
 // =============================================================================
 
 const FALLBACK_POSITION_PCT = 0.02;
-const MAX_PORTFOLIO_EXPOSURE = 0.20;           // 20%
-const MAX_OPEN_POSITIONS = 5;                  // 5 positions
+const MAX_PORTFOLIO_EXPOSURE = 0.20;
+const MAX_OPEN_POSITIONS = 5;
 const STOP_LOSS_PCT = 0.15;
 const TRAILING_ACTIVATE_PCT = 0.15;
 const TRAILING_RETRACE_PCT = 0.92;
 const MAX_SLIPPAGE_PCT = 0.05;
 const DEPTH_SLIPPAGE_TOL = 15;
 
-// ALPHA HUNTING THRESHOLDS (Loosened but not degenerate)
-const MIN_EDGE = 0.015;                        // 1.5%
-const MIN_CONFIDENCE = 0.55;                   // 55%
-const MIN_VOLUME_USD = 500;                    // 500 (khusus live)
-const MAX_SPREAD_PERCENT = 0.05;               // 5%
+const MIN_EDGE = 0.015;
+const MIN_CONFIDENCE = 0.55;
+const MIN_VOLUME_USD = 500;
+const MAX_SPREAD_PERCENT = 0.05;
 const MIN_HOURS_LIQUID = 1;
 
 const MIN_PAPER_ORDER_USD = 0.5;
@@ -59,10 +56,6 @@ export interface RunOptions {
   config: BotConfig;
   walletUsd?: number;
 }
-
-// =============================================================================
-// HELPER FUNCTIONS
-// =============================================================================
 
 function modeTone(mode: TradeMode): "green" | "yellow" | "cyan" {
   if (mode === "execute") return "green";
@@ -114,15 +107,14 @@ function estimateModelProbability(forecastTemp: number, bucket: [number, number]
   }
 }
 
-// ELEGANT BOUNDARY DECAY (bukan hard penalty)
 function getBoundaryPenalty(forecastTemp: number, low: number, high: number): number {
   const distToLow = Math.abs(forecastTemp - low);
   const distToHigh = Math.abs(forecastTemp - high);
   const dist = Math.min(distToLow, distToHigh);
   
-  if (dist < 1) return 0.85;      // Sangat dekat: 15% penalty
-  if (dist < 2) return 0.93;      // Dekat: 7% penalty
-  return 1.0;                      // Aman
+  if (dist < 1) return 0.85;
+  if (dist < 2) return 0.93;
+  return 1.0;
 }
 
 function currentExposure(positions: Record<string, PositionWithTracker>): number {
@@ -146,20 +138,13 @@ function calculatePositionSizeWithConfidenceKelly(
   losingStreak: number = 0
 ): number {
   let positionPct = getPositionSize(modelProb, marketPrice, confidence, losingStreak);
-  
   if (positionPct <= 0) return 0;
-  
   let positionSize = balance * positionPct;
-  
   const minOrderUsd = mode === "execute" ? MIN_EXECUTE_ORDER_USD : MIN_PAPER_ORDER_USD;
   if (positionSize < minOrderUsd) positionSize = minOrderUsd;
-  
   return Number(positionSize.toFixed(2));
 }
 
-// =============================================================================
-// EXIT LOGIC
-// =============================================================================
 async function checkAndExecuteExit(
   marketId: string,
   pos: PositionWithTracker,
@@ -267,9 +252,6 @@ async function checkAndExecuteExit(
   return false;
 }
 
-// =============================================================================
-// SHOW POSITIONS
-// =============================================================================
 export async function showPositions(): Promise<void> {
   const sim = await loadSim();
   const positions = sim.positions;
@@ -312,9 +294,6 @@ export async function showPositions(): Promise<void> {
   ], totalUnrealized >=0 ? "green" : "red"));
 }
 
-// =============================================================================
-// MAIN RUN FUNCTION - ALPHA HUNTING MODE (PAPER BYPASS LIQUIDITY)
-// =============================================================================
 export async function run(options: RunOptions): Promise<void> {
   const { mode, config } = options;
   const sim = await loadSim();
@@ -323,7 +302,6 @@ export async function run(options: RunOptions): Promise<void> {
   let tradesExecuted = 0, exitsFound = 0;
   let clob: ClobClient | undefined;
   
-  // Alpha funnel metrics
   let scanned = 0;
   let passedEdge = 0;
   let passedConf = 0;
@@ -350,7 +328,7 @@ export async function run(options: RunOptions): Promise<void> {
     return;
   }
 
-  console.log("\n" + panel("Weather Trading Bot (ALPHA HUNTING MODE)", [
+  console.log("\n" + panel("Weather Trading Bot (ALPHA HUNTING MODE - FIXED)", [
     `${badge(modeText(mode), modeTone(mode))}`,
     stat("Balance", `$${balance.toFixed(2)}`, "cyan"),
     stat("Max position", `3% of balance`, "blue"),
@@ -366,7 +344,6 @@ export async function run(options: RunOptions): Promise<void> {
   const balanceRef = { value: balance };
   const persist = mode === "paper" || mode === "execute";
 
-  // EXIT SCAN
   console.log(`\n${divider("EXIT SCAN", "magenta")}`);
   for (const [mid, pos] of Object.entries(positions)) {
     const currentPrice = await getMarketYesPrice(mid);
@@ -404,18 +381,17 @@ export async function run(options: RunOptions): Promise<void> {
   }
   if (!exitsFound) skip("No exit opportunities");
 
-  // ENTRY SCAN - ALPHA HUNTING
   console.log(`\n${divider("ENTRY SCAN (Alpha Hunting)", "cyan")}`);
   const activeLocations = getActiveLocations(config);
   const candidates: AlphaCandidate[] = [];
 
   const openCount = Object.keys(positions).length;
   if (openCount >= MAX_OPEN_POSITIONS) {
-    skip(`Max open positions reached: ${openCount}/${MAX_OPEN_POSITIONS}`);
+    skip(`Max open positions reached`);
   } else {
     const exposure = currentExposure(positions);
     if (exposure > balanceRef.value * MAX_PORTFOLIO_EXPOSURE) {
-      skip(`Exposure cap hit: ${((exposure/balanceRef.value)*100).toFixed(1)}% > ${MAX_PORTFOLIO_EXPOSURE*100}%`);
+      skip(`Exposure cap hit`);
     } else {
       const openRegions = getOpenRegions(positions);
       
@@ -426,9 +402,7 @@ export async function run(options: RunOptions): Promise<void> {
         const unit = cityData?.unit || 'F';
         
         const region = getRegion(citySlug);
-        if (openRegions.has(region)) {
-          continue;
-        }
+        if (openRegions.has(region)) continue;
         
         for (let i = 0; i < 4; i++) {
           const date = new Date(); date.setDate(date.getDate() + i);
@@ -450,9 +424,8 @@ export async function run(options: RunOptions): Promise<void> {
               usedEnsemble = true;
               disagreementScore = multiModel.disagreementScore;
               consensus = multiModel.consensus;
-              
               if (!consensus && disagreementScore > (cityData.unit === 'F' ? 3.0 : 1.8)) {
-                console.log(`[ALPHA] High disagreement! ${disagreementScore.toFixed(1)}°${cityData.unit} - chaos opportunity`);
+                console.log(`[ALPHA] High disagreement! ${disagreementScore.toFixed(1)}°${cityData.unit}`);
               }
             }
           }
@@ -462,13 +435,16 @@ export async function run(options: RunOptions): Promise<void> {
             forecastTemp = forecast[dateStr] || null;
           }
           
-          if (!forecastTemp) continue;
+          // SKIP jika forecastTemp null
+          if (!forecastTemp) {
+            console.log(`[WARN] No forecast for ${citySlug} on ${dateStr}`);
+            continue;
+          }
           
           const event = await getPolymarketEvent(citySlug, month, day, year);
           if (!event) continue;
           const hoursLeft = hoursUntilResolution(event);
-          
-          if (hoursLeft < MIN_HOURS_LIQUID) { continue; }
+          if (hoursLeft < MIN_HOURS_LIQUID) continue;
           
           let matched = null;
           for (const market of event.markets ?? []) {
@@ -495,8 +471,9 @@ export async function run(options: RunOptions): Promise<void> {
                   }
                   modelProb = calculateProbabilityFromEnsemble(allSamples, rng[0], rng[1]);
                 } else {
-                  // FALLBACK: turunin confidence, jangan naikin conviction
-                  modelProb = 0.60;
+                  // FIXED: pake deterministic forecast, bukan hardcode
+                  modelProb = estimateModelProbability(forecastTemp, rng);
+                  console.log(`[FALLBACK] ${citySlug}: ensemble failed, using deterministic, prob=${(modelProb*100).toFixed(1)}%`);
                 }
               } else {
                 modelProb = estimateModelProbability(forecastTemp, rng);
@@ -511,83 +488,65 @@ export async function run(options: RunOptions): Promise<void> {
               break;
             }
           }
-          if (!matched) { continue; }
+          if (!matched) continue;
           
           const price = Number(matched.price);
-          if (isNaN(price)) { continue; }
+          if (isNaN(price)) continue;
           
           let edge = calculateEdge(modelProb, price);
           const isDisagreementTrade = !consensus && disagreementScore > (cityData?.unit === 'F' ? 3.0 : 1.8);
-          
           if (isDisagreementTrade) {
-            edge = edge * 1.3;  // Disagreement boost
-            console.log(`[ALPHA] Disagreement boost: ${(edge*100).toFixed(1)}% edge`);
+            edge = edge * 1.3;
+            console.log(`[ALPHA] Disagreement boost: ${(edge*100).toFixed(1)}%`);
           }
           
-          // BOUNDARY DECAY (bukan hard penalty)
           const boundaryPenalty = getBoundaryPenalty(forecastTemp, matched.range[0], matched.range[1]);
           let finalEdge = edge * boundaryPenalty;
-          
           if (boundaryPenalty < 1.0) {
-            console.log(`[BOUNDARY] ${citySlug}: penalty ${((1-boundaryPenalty)*100).toFixed(0)}% applied`);
+            console.log(`[BOUNDARY] ${citySlug}: penalty ${((1-boundaryPenalty)*100).toFixed(0)}%`);
           }
           
-          // Get confidence (with fallback penalty jika no ensemble)
           let confidence = getConfidence(modelProb);
-          if (!usedEnsemble) {
-            confidence *= 0.85;  // Turunin confidence kalo pake deterministic fallback
-          }
+          if (!usedEnsemble) confidence *= 0.85;
           
-          // ALPHA FUNNEL METRICS
           if (finalEdge < MIN_EDGE) {
-            console.log(`[DEBUG EDGE] ${citySlug}: prob=${(modelProb*100).toFixed(1)}% price=${(price*100).toFixed(1)}% rawEdge=${(edge*100).toFixed(2)}% penalty=${boundaryPenalty} finalEdge=${(finalEdge*100).toFixed(2)}% < ${MIN_EDGE*100}%`);
+            console.log(`[DEBUG EDGE] ${citySlug}: ${(finalEdge*100).toFixed(2)}% < ${MIN_EDGE*100}%`);
             continue;
           }
           passedEdge++;
           
           if (confidence < MIN_CONFIDENCE) {
-            console.log(`[DEBUG CONF] ${citySlug}: confidence=${(confidence*100).toFixed(0)}% < ${MIN_CONFIDENCE*100}%`);
+            console.log(`[DEBUG CONF] ${citySlug}: ${(confidence*100).toFixed(0)}% < ${MIN_CONFIDENCE*100}%`);
             continue;
           }
           passedConf++;
           
           let bestPriceData = null;
           let volume = { volume24h: 0, volume7d: 0 };
-          let tokenIdCheck = null;
+          let tokenIdCheck = getYesTokenId(matched.market);
           
-          tokenIdCheck = getYesTokenId(matched.market);
-          
-          // VOLUME FILTER: ONLY FOR LIVE MODE (PAPER BYPASS)
           if (mode === "execute" && tokenIdCheck) {
             volume = await getMarketVolume(tokenIdCheck);
-            if (volume.volume24h < MIN_VOLUME_USD) {
-              continue;
-            }
+            if (volume.volume24h < MIN_VOLUME_USD) continue;
           } else if (mode === "paper" && tokenIdCheck) {
-            // Paper mode: hanya untuk info, tidak di-filter
             volume = await getMarketVolume(tokenIdCheck);
           }
           
           if (tokenIdCheck && mode !== "dry-run") {
             bestPriceData = await getBestBidAsk(tokenIdCheck);
-            
             if (bestPriceData && bestPriceData.spreadPercent > MAX_SPREAD_PERCENT) {
-              console.log(`[DEBUG SPREAD] ${citySlug}: spread=${(bestPriceData.spreadPercent*100).toFixed(1)}% > ${MAX_SPREAD_PERCENT*100}%`);
+              console.log(`[DEBUG SPREAD] ${citySlug}: ${(bestPriceData.spreadPercent*100).toFixed(1)}% > ${MAX_SPREAD_PERCENT*100}%`);
               continue;
             }
           }
           
-          // ================= LIQUIDITY CHECK: PAPER MODE BYPASS =================
           if (mode === "paper") {
-            // Paper mode: lewati liquidity filter
             passedLiquidity++;
           } else {
-            // Live/Execute mode: cek liquidity
             const depthUSDC = (bestPriceData?.askSize || 0) * (bestPriceData?.ask || price);
             const liquidityMetrics = calculateLiquidityScore(depthUSDC, volume.volume24h, bestPriceData?.spreadPercent || 0.03);
-            
             if (!liquidityMetrics.isLiquid && mode === "execute") {
-              console.log(`[DEBUG LIQ] ${citySlug}: score=${liquidityMetrics.totalScore} tier=${liquidityMetrics.isLiquid ? 'OK' : 'BAD'}`);
+              console.log(`[DEBUG LIQ] ${citySlug}: score=${liquidityMetrics.totalScore}`);
               continue;
             }
             passedLiquidity++;
@@ -598,7 +557,9 @@ export async function run(options: RunOptions): Promise<void> {
             balanceRef.value, modelProb, price, confidence, mode, losingStreak
           );
           positionSize = positionSize * edgeMultiplier;
-          positionSize = Math.min(positionSize, balanceRef.value * 0.05);
+          positionSize = Math.min(positionSize, balanceRef.value * 0.03);
+          
+          console.log(`[SIZE DEBUG] ${citySlug}: prob=${modelProb.toFixed(3)} price=${price.toFixed(3)} conf=${confidence.toFixed(2)} edge=${(finalEdge*100).toFixed(1)}% size=${positionSize.toFixed(2)}`);
           
           if (positionSize <= 0) continue;
           
@@ -630,7 +591,6 @@ export async function run(options: RunOptions): Promise<void> {
   
   finalCandidatesCount = candidates.length;
   
-  // ALPHA FUNNEL SUMMARY
   console.log(`\n${divider("ALPHA FUNNEL", "yellow")}`);
   console.log(`  Scanned: ${scanned}`);
   console.log(`  Passed Edge: ${passedEdge}`);
@@ -639,6 +599,7 @@ export async function run(options: RunOptions): Promise<void> {
   console.log(`  Final Candidates: ${finalCandidatesCount}`);
   
   const rankedCandidates = candidates;
+  
   console.log(`\n${divider(`TOP ${rankedCandidates.length} CANDIDATES`, "green")}`);
   
   for (const cand of rankedCandidates) {
@@ -652,12 +613,10 @@ export async function run(options: RunOptions): Promise<void> {
     positionSize = positionSize * edgeMultiplier;
     positionSize = Math.min(positionSize, balanceRef.value * 0.03);
     
-    console.log(`[SIZE DEBUG] ${cand.citySlug}: prob=${cand.modelProb.toFixed(3)} price=${cand.price.toFixed(3)} conf=${cand.confidence.toFixed(2)} edge=${(cand.edge*100).toFixed(1)}% size=${positionSize.toFixed(2)}`);
-
-if (positionSize <= 0) {
-  skip(`Position size too small for ${cand.citySlug}`);
-  continue;
-}
+    if (positionSize <= 0) {
+      skip(`Position size too small for ${cand.citySlug}`);
+      continue;
+    }
     
     const shares = positionSize / cand.price;
     const edgeTier = getEdgeTier(cand.edge);
@@ -676,13 +635,13 @@ if (positionSize <= 0) {
       const requiredShares = positionSize / cand.price;
       const isLiquid = await isLiquidEnough(cand.tokenId, requiredShares, DEPTH_SLIPPAGE_TOL);
       if (!isLiquid) {
-        skip(`Not liquid enough for ${requiredShares.toFixed(1)} shares`);
+        skip(`Not liquid enough`);
         continue;
       }
       
       const ba = await getBestBidAsk(cand.tokenId);
       if (ba && ba.ask > cand.price * (1 + MAX_SLIPPAGE_PCT)) {
-        skip(`Best ask ${ba.ask.toFixed(4)} > ${MAX_SLIPPAGE_PCT*100}% above price`);
+        skip(`Slippage too high`);
         continue;
       }
     }
